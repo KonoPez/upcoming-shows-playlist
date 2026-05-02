@@ -28,6 +28,7 @@ from spotify_client.auth import get_spotify_client
 from spotify_client.client import SpotifyClient
 from playlist_logic.weighting import compute_artist_weights, allocate_slots, ConcertSlot
 from playlist_logic.scoring import select_tracks_for_artist
+from sources.setlist import SetlistClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,6 +120,12 @@ def cmd_setup() -> None:
     print('  Get a free key at https://developer.ticketmaster.com/\n')
     tm_key = prompt('Ticketmaster API key', config.ticketmaster_api_key, required=False)
 
+    # ── Setlist.fm ────────────────────────────────────────────────────────────
+    print('\nSetlist.fm (optional)')
+    print('  Boosts tracks that artists regularly play live.')
+    print('  Get a free key at https://www.setlist.fm/settings/apps\n')
+    setlist_key = prompt('Setlist.fm API key', config.setlist_fm_api_key, required=False)
+
     # ── Write .env ────────────────────────────────────────────────────────────
     env_lines = [
         '# Concert Playlist Configuration',
@@ -137,6 +144,9 @@ def cmd_setup() -> None:
         '',
         '# Ticketmaster (optional)',
         f'TICKETMASTER_API_KEY={tm_key}',
+        '',
+        '# Setlist.fm (optional)',
+        f'SETLIST_FM_API_KEY={setlist_key}',
         '',
         '# Playlist',
         f'PLAYLIST_ID={playlist_id}',
@@ -277,12 +287,13 @@ def cmd_build(dry_run: bool = False) -> None:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
 
-    # 5. Compute weights and allocate track slots
+    # 5. Compute weights and allocate duration budgets
+    _ASSUMED_AVG_TRACK_MS = 210_000  # 3.5 min — used only to derive min exclusion threshold
     weights = compute_artist_weights(artist_concerts)
     slots = allocate_slots(
         weights,
-        target_size=config.playlist_target_size,
-        min_slots=config.min_tracks_per_artist,
+        target_duration_ms=config.playlist_target_duration_minutes * 60_000,
+        min_duration_ms=config.min_tracks_per_artist * _ASSUMED_AVG_TRACK_MS,
     )
 
     # 6. Get user familiarity from Spotify API
@@ -290,9 +301,13 @@ def cmd_build(dry_run: bool = False) -> None:
     spotify_familiarity = sp.get_user_familiarity(cache)
 
     # 7. Select tracks per artist
-    selected_by_artist: dict[str, list[dict]] = {}
+    setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
+        if config.setlist_fm_api_key else None
 
-    for artist_id, num_slots in sorted(slots.items(), key=lambda x: -x[1]):
+    selected_by_artist: dict[str, list[dict]] = {}
+    setlist_by_artist: dict[str, dict] = {}
+
+    for artist_id, duration_budget_ms in sorted(slots.items(), key=lambda x: -x[1]):
         name = artist_names.get(artist_id, artist_id)
         logger.info(f'  {name}: fetching discography…')
 
@@ -302,17 +317,22 @@ def cmd_build(dry_run: bool = False) -> None:
             continue
 
         play_counts = cache.get_play_counts(artist_id)
+        setlist_scores = setlist_client.get_setlist_scores(name) if setlist_client else None
+        if setlist_scores:
+            setlist_by_artist[artist_id] = setlist_scores
         chosen = select_tracks_for_artist(
             tracks=tracks,
-            num_slots=num_slots,
+            duration_budget_ms=duration_budget_ms,
             spotify_familiarity=spotify_familiarity,
             play_counts=play_counts,
             today=today,
+            setlist_scores=setlist_scores,
         )
         selected_by_artist[artist_id] = chosen
+        chosen_ms = sum(t.get('duration_ms', 0) for t in chosen)
         logger.info(
-            f'  {name}: {len(chosen)}/{num_slots} tracks selected '
-            f'(from {len(tracks)} in discography, '
+            f'  {name}: {len(chosen)} tracks (~{chosen_ms // 60_000}m of {duration_budget_ms // 60_000}m budget, '
+            f'{len(tracks)} in discography, '
             f'concert in {min(s.days_until for s in artist_concerts[artist_id])}d)'
         )
 
@@ -326,19 +346,25 @@ def cmd_build(dry_run: bool = False) -> None:
 
     track_uris = [f'spotify:track:{t["id"]}' for t in all_tracks]
     total = len(track_uris)
+    total_ms = sum(t.get('duration_ms', 0) for t in all_tracks)
+    total_min = total_ms // 60_000
 
     # 9. Dry run: print summary and exit
     if dry_run:
-        print(f'\n=== DRY RUN — {total} tracks from {len(selected_by_artist)} artists ===\n')
+        print(f'\n=== DRY RUN — {total} tracks (~{total_min}m) from {len(selected_by_artist)} artists ===\n')
         for artist_id in sorted(slots, key=nearest):
             name = artist_names.get(artist_id, artist_id)
             days = nearest(artist_id)
             chosen = selected_by_artist.get(artist_id, [])
-            print(f'{name}  ({len(chosen)} tracks, concert in {days}d):')
+            chosen_min = sum(t.get('duration_ms', 0) for t in chosen) // 60_000
+            print(f'{name}  ({len(chosen)} tracks, ~{chosen_min}m, concert in {days}d):')
+            scores = setlist_by_artist.get(artist_id, {})
             for t in chosen:
                 release = t.get('release_date', '?')[:4]
-                pop = t.get('popularity', 0)
-                print(f'  [{pop:>3}] {t["name"]}  ({t.get("album_name", "")}, {release})')
+                dur = t.get('duration_ms', 0) // 1000
+                freq = scores.get(t.get('name', '').lower().strip())
+                freq_str = f'{freq:.0%}' if freq is not None else '  —'
+                print(f'  [{freq_str:>4}] {t["name"]}  ({t.get("album_name", "")}, {release}) [{dur//60}:{dur%60:02d}]')
             print()
         return
 
@@ -346,7 +372,7 @@ def cmd_build(dry_run: bool = False) -> None:
     playlist_id = sp.get_or_create_playlist(config.playlist_name, config.playlist_id)
     sp.update_playlist_tracks(playlist_id, track_uris)
 
-    print(f'\nPlaylist updated: {total} tracks from {len(selected_by_artist)} artists')
+    print(f'\nPlaylist updated: {total} tracks (~{total_min}m) from {len(selected_by_artist)} artists')
     print(f'Open: https://open.spotify.com/playlist/{playlist_id}')
 
 

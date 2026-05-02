@@ -1,15 +1,21 @@
 """
 Track scoring for playlist inclusion.
 
-Each track receives a composite score from three signals:
-  - Popularity (55%): Spotify's popularity metric — the dominant signal, as a
-    proxy for "fan favorites and tracks likely to appear in a setlist." Weighted
-    highest so that catalog hits (e.g. 218M-stream tracks from 2023) rank above
-    obscure tracks from a brand-new album.
-  - Recency (25%): Tracks from the most recent 18 months score highest. New
-    material is likely to be featured on tour.
-  - Novelty (20%): The inverse of familiarity. Tracks the user hasn't heard
-    (or rarely hears) score highest, pushing the playlist toward discovery.
+Weights depend on whether setlist.fm data is available for the artist:
+
+  WITH setlist data (SETLIST_FM_API_KEY configured):
+    - Setlist frequency (60%): how often the artist plays this song live.
+      Tracks played at every sampled show score 1.0; unplayed tracks score 0.0.
+      This is the dominant signal — actual live evidence beats any proxy.
+    - Recency (20%): tracks from the most recent 18 months score highest.
+      Kept at a reduced weight because new material often appears in setlists
+      quickly, but older staples should not be penalised too heavily.
+    - Novelty (20%): inverse of familiarity — surfaces tracks the user hasn't
+      heard yet.
+
+  WITHOUT setlist data:
+    - Recency (80%): the dominant proxy for "will they play this on tour."
+    - Novelty (20%): same as above.
 
 Familiarity is computed from two sources, combined by taking the max:
   - Spotify API: top tracks (short/medium/long term) + recently played.
@@ -20,12 +26,18 @@ Familiarity is computed from two sources, combined by taking the max:
 import logging
 import math
 from datetime import date
+from typing import Optional  # noqa: F401 — used in Optional[dict] annotations
 
 logger = logging.getLogger(__name__)
 
-POPULARITY_W = 0.55
-RECENCY_W = 0.25
 NOVELTY_W = 0.20
+
+# Weights when setlist.fm data is available for this artist
+SETLIST_W = 0.60
+RECENCY_W = 0.20
+
+# Weights when no setlist data is available (recency is the best proxy)
+RECENCY_W_FALLBACK = 0.80
 
 RECENCY_WINDOW_DAYS = 548   # 18 months
 FAMILIAR_AT_N_PLAYS = 10    # play count that maxes out familiarity
@@ -65,13 +77,22 @@ def _familiarity(
 
 def score_track(
     track: dict,
-    spotify_familiarity: dict[str, float],
-    play_counts: dict[str, int],
+    spotify_familiarity: dict,
+    play_counts: dict,
     today: date,
+    setlist_scores: Optional[dict] = None,
 ) -> float:
-    """Return a composite score (0.0–1.0) for a single track."""
-    popularity = track.get('popularity', 0) / 100.0
+    """
+    Return a composite score for a single track (0.0–1.0).
 
+    With setlist data:    60% setlist frequency + 20% recency + 20% novelty.
+    Without setlist data: 80% recency + 20% novelty.
+
+    The higher recency weight without setlist data reflects that recency is the
+    best available proxy for "likely to be played live" when actual data is absent.
+    With real setlist data, recency is reduced so older staples aren't unfairly
+    penalised relative to new tracks.
+    """
     release_date = _parse_release_date(
         track.get('release_date', '2000-01-01'),
         track.get('release_date_precision', 'year'),
@@ -81,7 +102,12 @@ def score_track(
     fam = _familiarity(track.get('id', ''), spotify_familiarity, play_counts)
     novelty = 1.0 - fam
 
-    return POPULARITY_W * popularity + RECENCY_W * recency + NOVELTY_W * novelty
+    if setlist_scores:
+        name_key = track.get('name', '').lower().strip()
+        freq = setlist_scores.get(name_key, 0.0)
+        return SETLIST_W * freq + RECENCY_W * recency + NOVELTY_W * novelty
+
+    return RECENCY_W_FALLBACK * recency + NOVELTY_W * novelty
 
 
 def _interleave_albums(tracks: list[dict]) -> list[dict]:
@@ -116,42 +142,44 @@ def _interleave_albums(tracks: list[dict]) -> list[dict]:
 
 
 def select_tracks_for_artist(
-    tracks: list[dict],
-    num_slots: int,
-    spotify_familiarity: dict[str, float],
-    play_counts: dict[str, int],
+    tracks: list,
+    duration_budget_ms: int,
+    spotify_familiarity: dict,
+    play_counts: dict,
     today: date,
     max_per_album: int = 6,
-) -> list[dict]:
+    setlist_scores: Optional[dict] = None,
+) -> list:
     """
-    Score all tracks for an artist and return the top `num_slots`.
+    Score all tracks for an artist and greedily select them until the
+    cumulative duration reaches `duration_budget_ms`.
 
-    Applies a per-album cap during greedy selection (max_per_album, default 4)
-    so a single album — especially a just-released one where all tracks score
-    equally on popularity — cannot claim every slot. Tracks without an album_id
-    are uncapped (legacy/test data).
+    Applies a per-album cap (max_per_album) so a single album cannot claim
+    every slot. Tracks without an album_id are uncapped.
 
-    The selected tracks are then interleaved across albums (newest album first,
+    The selected tracks are interleaved across albums (newest album first,
     round-robin) so no two consecutive tracks come from the same album.
     """
-    if not tracks or num_slots == 0:
+    if not tracks or duration_budget_ms == 0:
         return []
 
     scored = [
-        (score_track(t, spotify_familiarity, play_counts, today), t)
+        (score_track(t, spotify_familiarity, play_counts, today, setlist_scores), t)
         for t in tracks
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Greedy selection with per-album cap
+    # Greedy selection with per-album cap, stopping when duration budget is reached
     album_counts: dict = {}
     selected = []
+    total_ms = 0
     for _, t in scored:
-        if len(selected) >= num_slots:
+        if total_ms >= duration_budget_ms:
             break
         aid = t.get('album_id') or ''
         if not aid or album_counts.get(aid, 0) < max_per_album:
             selected.append(t)
+            total_ms += t.get('duration_ms', 0)
             if aid:
                 album_counts[aid] = album_counts.get(aid, 0) + 1
 

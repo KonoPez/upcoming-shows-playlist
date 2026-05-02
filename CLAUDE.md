@@ -19,7 +19,7 @@ python main.py --dry-run    # preview playlist without writing to Spotify
 python -m pytest tests/ -v
 ```
 
-237 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~2 seconds.
+301 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~3 seconds.
 
 ## Project layout
 
@@ -38,13 +38,15 @@ spotify_client/
   client.py                 # Playlist management, discography fetching, play history
 playlist_logic/
   weighting.py              # Exponential decay weights + Hamilton's slot allocation
-  scoring.py                # Track scoring: popularity + recency + novelty
+  scoring.py                # Track scoring: setlist frequency + recency + novelty
+  setlist.py                # Setlist.fm client — live play frequency per track
 tests/
   test_artist_resolver.py   # Title parsing, artist splitting, Spotify search, resolve_artist
   test_playlist_logic.py    # Weighting, slot allocation, track scoring, album interleaving
   test_cache.py             # KV TTL cache, play history accumulation
   test_spotify_client.py    # Variant recording filter (_is_variant_recording)
   test_ticketmaster.py      # Venue matching, Spotify ID extraction, opener enrichment
+  test_setlist.py           # SetlistClient behaviour + setlist frequency in scoring
 conftest.py                 # Adds project root to sys.path for test imports
 .env                        # Local secrets — never commit
 .env.example                # Template with comments
@@ -62,6 +64,7 @@ conftest.py                 # Adds project root to sys.path for test imports
 | `PLAYLIST_ID` | No | Auto-written by `--setup` |
 | `PLAYLIST_NAME` | No | Defaults to `Concert Prep` |
 | `TICKETMASTER_API_KEY` | No | Enables opener-act lookup; free key at developer.ticketmaster.com |
+| `SETLIST_FM_API_KEY` | No | Boosts tracks artists regularly play live; free key at setlist.fm/settings/apps |
 
 At least one calendar source must be configured.
 
@@ -77,16 +80,18 @@ At least one calendar source must be configured.
 
 **Variant recording filter**: `client._is_variant_recording(track_name, album_name)` skips live, acoustic, unplugged, remix, instrumental, and demo recordings before they enter the scoring pipeline. Album-level check (e.g. "Live at X", "Unplugged", "Remixes") skips the whole album. Track-level check matches both parenthetical suffixes (e.g. "Song (Live)") and dash suffixes (e.g. "Song - Acoustic", "Song - Demo") to avoid false positives on artistic titles like "Live Wire".
 
-**Track scoring** (see `playlist_logic/scoring.py`): 55% popularity + 25% recency (18-month window) + 20% novelty (inverse of familiarity). Popularity is weighted highest so catalog hits rank above zero-popularity new tracks. Familiarity combines Spotify top-tracks API signal and local play-count history, taking the max. A per-album cap (default 4 tracks) prevents a single album from dominating when all popularity scores are 0; selected tracks are then interleaved across albums (newest first, round-robin) to avoid consecutive same-album runs.
+**Track scoring** (see `playlist_logic/scoring.py`): Weights depend on whether setlist.fm data is available. *With setlist data*: 60% setlist frequency + 20% recency + 20% novelty. *Without setlist data*: 80% recency + 20% novelty. Setlist frequency (0.0–1.0) is how often the artist plays that track across their last 10 shows within the past year, sourced from setlist.fm. Using actual live-performance data as the dominant signal means old staples score fairly — a 5-year-old song played at every show beats a new track never played live. Recency is kept at 20% (not zero) even with setlist data because new tour material often enters setlists quickly. Without setlist data, recency becomes the dominant proxy. Novelty (inverse of familiarity) is always 20%. Familiarity combines Spotify top-tracks API signal and local play-count history, taking the max. A per-album cap (default 6 tracks) prevents a single album from dominating; selected tracks are then interleaved across albums (newest first, round-robin) to avoid consecutive same-album runs. Spotify's `popularity` field is deprecated and returns 0 for most artists — it is not used.
 
-**Slot allocation** (see `playlist_logic/weighting.py`): Exponential decay with 21-day half-life. Artists whose proportional share falls below `min_tracks_per_artist` (default 2) are excluded. Hamilton's method distributes rounding so total equals `playlist_target_size` exactly (default 60).
+**Setlist.fm integration** (`sources/setlist.py`): `SetlistClient.get_setlist_scores(artist_name)` fetches up to 10 recent shows (within the past year) via `GET /search/setlists?artistName=`. Each song is counted once per show (encores deduplicated). Frequency = appearances / shows_analysed. A 1-second sleep is inserted before each API call to respect rate limits. Results cached 7 days; empty results are also cached to avoid re-hitting the API for artists with no data. A `—` in `--dry-run` output means no setlist entry for that track (either the artist has no setlist API data, or the track never appeared in recent shows).
+
+**Slot allocation** (see `playlist_logic/weighting.py`): Exponential decay with 21-day half-life. `allocate_slots` distributes a total duration budget (default 2 hours) proportionally across artists. Artists whose proportional share is below `min_tracks_per_artist × 3.5 min` are excluded. Hamilton's method distributes rounding so budgets sum to the target exactly. `select_tracks_for_artist` greedily fills each artist's time budget by score, stopping once the accumulated `duration_ms` reaches the artist's budget (rounding up to the last whole track).
 
 **Cache** (`~/.concert-playlist/cache.db`): SQLite. Two tables — `kv_cache` (TTL-based, stores artist resolutions and discographies) and `play_history` (append-only, accumulates plays across weekly runs to improve novelty scores over time).
 
 ## Tuning knobs (config.py)
 
 ```python
-concert_window_days: int = 90       # how far ahead to look for concerts
-playlist_target_size: int = 60      # total tracks in the playlist
-min_tracks_per_artist: int = 2      # minimum slots; artists below threshold excluded
+concert_window_days: int = 90              # how far ahead to look for concerts
+playlist_target_duration_minutes: int = 120  # target total playlist length
+min_tracks_per_artist: int = 2             # min tracks worth of budget; artists below excluded
 ```

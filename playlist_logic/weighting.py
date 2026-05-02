@@ -69,21 +69,21 @@ def compute_artist_weights(artist_concerts: dict[str, list[ConcertSlot]]) -> dic
 
 def allocate_slots(
     weights: dict[str, float],
-    target_size: int,
-    min_slots: int = 2,
+    target_duration_ms: int,
+    min_duration_ms: int = 0,
 ) -> dict[str, int]:
     """
-    Distribute `target_size` track slots across artists proportional to their weights.
+    Distribute `target_duration_ms` of playlist time across artists proportional
+    to their weights.
 
-    Artists whose exact proportional share is below `min_slots` are excluded —
-    a far-away concert doesn't justify playlist space when near-term concerts
-    already fill the target. The exponential decay in weights handles this
-    naturally: a concert 90 days out has ~5% weight of one tomorrow.
+    Artists whose exact proportional share is below `min_duration_ms` are
+    excluded — a far-away concert doesn't justify playlist space when near-term
+    concerts already fill the target.
 
-    Uses Hamilton's method (largest remainder) so the total equals target_size
-    exactly and no slots are wasted.
+    Uses Hamilton's method (largest remainder) so the budgets sum to
+    target_duration_ms exactly.
 
-    Returns: {spotify_artist_id: num_slots}  (only artists with slots > 0)
+    Returns: {spotify_artist_id: duration_budget_ms}  (only artists with budget > 0)
     """
     if not weights:
         return {}
@@ -93,25 +93,25 @@ def allocate_slots(
         return {}
 
     # Exact proportional allocation
-    exact = {aid: (w / total_weight) * target_size for aid, w in weights.items()}
+    exact = {aid: (w / total_weight) * target_duration_ms for aid, w in weights.items()}
 
-    # Exclude artists whose share is too small to justify even min_slots
-    qualified = {aid: e for aid, e in exact.items() if e >= min_slots}
+    # Exclude artists whose share is too small to justify the minimum
+    qualified = {aid: e for aid, e in exact.items() if e >= min_duration_ms}
 
     if not qualified:
         top = max(weights, key=weights.__getitem__)
-        return {top: target_size}
+        return {top: target_duration_ms}
 
     # Recompute proportions over qualified artists only
     q_weight_total = sum(weights[a] for a in qualified)
-    exact_q = {aid: (weights[aid] / q_weight_total) * target_size for aid in qualified}
+    exact_q = {aid: (weights[aid] / q_weight_total) * target_duration_ms for aid in qualified}
 
-    # Floor each value (enforce min_slots floor)
-    floors = {aid: max(min_slots, math.floor(v)) for aid, v in exact_q.items()}
+    # Floor each value (enforce min_duration_ms floor)
+    floors = {aid: max(min_duration_ms, math.floor(v)) for aid, v in exact_q.items()}
 
-    # Hamilton's method: distribute remaining slots by largest fractional remainder
+    # Hamilton's method: distribute remaining ms by largest fractional remainder
     remainders = {aid: exact_q[aid] - math.floor(exact_q[aid]) for aid in exact_q}
-    leftover = target_size - sum(floors.values())
+    leftover = target_duration_ms - sum(floors.values())
 
     for aid, _ in sorted(remainders.items(), key=lambda x: x[1], reverse=True):
         if leftover <= 0:
@@ -119,17 +119,17 @@ def allocate_slots(
         floors[aid] += 1
         leftover -= 1
 
-    # If min_slots floors pushed us over budget, trim from lightest artists first
-    overage = sum(floors.values()) - target_size
+    # If min_duration_ms floors pushed us over budget, trim from lightest artists first
+    overage = sum(floors.values()) - target_duration_ms
     for aid in sorted(floors, key=weights.get):
         if overage <= 0:
             break
-        trim = min(floors[aid] - min_slots, overage)
+        trim = min(floors[aid] - min_duration_ms, overage)
         floors[aid] -= trim
         overage -= trim
 
-    logger.debug('Slot allocation:')
-    for aid, slots in sorted(floors.items(), key=lambda x: -x[1]):
-        logger.debug(f'  {aid}: {slots} slots (weight={weights.get(aid, 0):.3f})')
+    logger.debug('Duration budget allocation:')
+    for aid, budget in sorted(floors.items(), key=lambda x: -x[1]):
+        logger.debug(f'  {aid}: {budget // 60_000}m budget (weight={weights.get(aid, 0):.3f})')
 
     return floors

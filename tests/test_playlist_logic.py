@@ -96,45 +96,49 @@ class TestComputeArtistWeights:
 
 # ── allocate_slots ────────────────────────────────────────────────────────────
 
+_MIN_MS = 420_000    # 2 tracks × 3.5 min — minimum budget threshold in tests
+_TARGET_MS = 4_200_000  # 70 min — target budget used across allocation tests
+
+
 class TestAllocateSlots:
     def test_total_equals_target(self):
         weights = {'a': 1.0, 'b': 0.5, 'c': 0.25}
-        slots = allocate_slots(weights, target_size=20, min_slots=2)
-        assert sum(slots.values()) == 20
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        assert sum(slots.values()) == _TARGET_MS
 
-    def test_all_included_artists_meet_min_slots(self):
+    def test_all_included_artists_meet_min_duration(self):
         weights = {'a': 1.0, 'b': 0.5, 'c': 0.25}
-        slots = allocate_slots(weights, target_size=20, min_slots=2)
-        assert all(v >= 2 for v in slots.values())
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        assert all(v >= _MIN_MS for v in slots.values())
 
-    def test_heavier_artist_gets_more_slots(self):
+    def test_heavier_artist_gets_more_budget(self):
         weights = {'heavy': 1.0, 'light': 0.2}
-        slots = allocate_slots(weights, target_size=20, min_slots=2)
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
         assert slots['heavy'] > slots['light']
 
-    def test_single_artist_gets_all_slots(self):
-        slots = allocate_slots({'only': 1.0}, target_size=15, min_slots=2)
-        assert slots == {'only': 15}
+    def test_single_artist_gets_full_budget(self):
+        slots = allocate_slots({'only': 1.0}, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        assert slots == {'only': _TARGET_MS}
 
     def test_empty_weights_returns_empty(self):
-        assert allocate_slots({}, target_size=20) == {}
+        assert allocate_slots({}, target_duration_ms=_TARGET_MS) == {}
 
     def test_artist_below_proportional_threshold_excluded(self):
-        # 'tiny' proportional share ≪ min_slots → should be dropped
+        # 'tiny' proportional share ≪ min_duration_ms → should be dropped
         weights = {'big': 100.0, 'tiny': 0.001}
-        slots = allocate_slots(weights, target_size=10, min_slots=2)
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
         assert 'tiny' not in slots
 
-    def test_no_slots_wasted(self):
-        # Hamilton's method must distribute every slot
+    def test_no_budget_wasted(self):
+        # Hamilton's method must distribute the full target
         weights = {'a': 3.0, 'b': 2.0, 'c': 1.0}
-        slots = allocate_slots(weights, target_size=17, min_slots=2)
-        assert sum(slots.values()) == 17
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        assert sum(slots.values()) == _TARGET_MS
 
     def test_two_equal_weight_artists_split_evenly(self):
         weights = {'a': 1.0, 'b': 1.0}
-        slots = allocate_slots(weights, target_size=10, min_slots=2)
-        assert slots['a'] == slots['b'] == 5
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        assert slots['a'] == slots['b'] == _TARGET_MS // 2
 
 
 # ── _parse_release_date ───────────────────────────────────────────────────────
@@ -234,9 +238,9 @@ class TestScoreTrack:
         score = score_track(self._track(), {}, {}, self.TODAY)
         assert 0.0 <= score <= 1.0
 
-    def test_higher_popularity_raises_score(self):
-        lo = score_track(self._track(popularity=10), {}, {}, self.TODAY)
-        hi = score_track(self._track(popularity=90), {}, {}, self.TODAY)
+    def test_higher_setlist_frequency_raises_score(self):
+        lo = score_track(self._track(), {}, {}, self.TODAY, setlist_scores={'test track': 0.1})
+        hi = score_track(self._track(), {}, {}, self.TODAY, setlist_scores={'test track': 0.9})
         assert hi > lo
 
     def test_familiar_track_scores_lower(self):
@@ -260,62 +264,69 @@ class TestScoreTrack:
 
 # ── select_tracks_for_artist ──────────────────────────────────────────────────
 
+_TRACK_MS = 210_000   # 3.5 min — duration assigned to each test track
+
+
 class TestSelectTracksForArtist:
     TODAY = date(2024, 1, 1)
 
     def _tracks(self, n, release_date='2000-01-01'):
-        """Create n tracks with ascending popularity (t1=pop10 … tN=popN*10)."""
+        """Create n tracks all sharing the same release date."""
         return [
             {
                 'id': f't{i}',
                 'name': f'Track {i}',
-                'popularity': i * 10,
                 'release_date': release_date,
                 'release_date_precision': 'day',
+                'duration_ms': _TRACK_MS,
             }
             for i in range(1, n + 1)
         ]
 
     def test_returns_requested_count(self):
-        selected = select_tracks_for_artist(self._tracks(10), 5, {}, {}, self.TODAY)
+        selected = select_tracks_for_artist(self._tracks(10), 5 * _TRACK_MS, {}, {}, self.TODAY)
         assert len(selected) == 5
 
-    def test_fewer_tracks_than_slots_returns_all(self):
-        selected = select_tracks_for_artist(self._tracks(3), 10, {}, {}, self.TODAY)
+    def test_fewer_tracks_than_budget_returns_all(self):
+        selected = select_tracks_for_artist(self._tracks(3), 10 * _TRACK_MS, {}, {}, self.TODAY)
         assert len(selected) == 3
 
     def test_empty_tracks_returns_empty(self):
-        assert select_tracks_for_artist([], 5, {}, {}, self.TODAY) == []
+        assert select_tracks_for_artist([], 5 * _TRACK_MS, {}, {}, self.TODAY) == []
 
-    def test_zero_slots_returns_empty(self):
+    def test_zero_budget_returns_empty(self):
         assert select_tracks_for_artist(self._tracks(5), 0, {}, {}, self.TODAY) == []
 
-    def test_unfamiliar_high_popularity_track_wins(self):
-        # t1–t4 are fully familiar; t5 is unknown → t5 should rank first
+    def test_unfamiliar_track_beats_familiar_tracks(self):
+        # t1–t4 are fully familiar (novelty=0); t5 is unknown (novelty=1.0).
+        # All tracks share an old release date so recency=0 for all — novelty
+        # is the only differentiator, so t5 should rank first.
         tracks = self._tracks(5)
         familiarity = {f't{i}': 1.0 for i in range(1, 5)}   # t1–t4 familiar
-        selected = select_tracks_for_artist(tracks, 1, familiarity, {}, self.TODAY)
+        selected = select_tracks_for_artist(tracks, 1 * _TRACK_MS, familiarity, {}, self.TODAY)
         assert selected[0]['id'] == 't5'
 
     def test_result_ordered_best_first(self):
-        # With no familiarity signal, highest popularity should be selected first
+        # Tracks with higher setlist frequency should be selected first
         tracks = self._tracks(5)
-        selected = select_tracks_for_artist(tracks, 3, {}, {}, self.TODAY)
-        popularities = [t['popularity'] for t in selected]
-        assert popularities == sorted(popularities, reverse=True)
+        setlist = {f'track {i}': i / 10 for i in range(1, 6)}   # track 5 → 0.5, track 1 → 0.1
+        selected = select_tracks_for_artist(tracks, 3 * _TRACK_MS, {}, {}, self.TODAY,
+                                            setlist_scores=setlist)
+        ids = [t['id'] for t in selected]
+        assert ids == ['t5', 't4', 't3']   # highest setlist frequency first
 
 
 # ── _interleave_albums ────────────────────────────────────────────────────────
 
-def _make_track(tid: str, album_id: str, release_date: str, popularity: int = 50) -> dict:
+def _make_track(tid: str, album_id: str, release_date: str) -> dict:
     return {
         'id': tid,
         'name': f'Track {tid}',
-        'popularity': popularity,
         'release_date': release_date,
         'release_date_precision': 'day',
         'album_id': album_id,
         'album_name': f'Album {album_id}',
+        'duration_ms': _TRACK_MS,
     }
 
 
@@ -361,26 +372,26 @@ class TestSelectTracksAlbumCap:
     TODAY = date(2024, 1, 1)
 
     def test_cap_fills_remaining_from_other_album(self):
-        # Album A: 8 tracks (high pop); Album B: 4 tracks (lower pop)
+        # Album A: 8 tracks (more recent); Album B: 4 tracks (older)
         # Request 6 with cap=4 → 4 from A, 2 from B
-        tracks_a = [_make_track(f'a{i}', 'albumA', '2024-01-01', popularity=80)
+        tracks_a = [_make_track(f'a{i}', 'albumA', '2024-01-01')
                     for i in range(8)]
-        tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01', popularity=30)
+        tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01')
                     for i in range(4)]
         selected = select_tracks_for_artist(
-            tracks_a + tracks_b, 6, {}, {}, self.TODAY, max_per_album=4
+            tracks_a + tracks_b, 6 * _TRACK_MS, {}, {}, self.TODAY, max_per_album=4
         )
         assert len(selected) == 6
         assert sum(1 for t in selected if t['album_id'] == 'albumA') == 4
         assert sum(1 for t in selected if t['album_id'] == 'albumB') == 2
 
     def test_no_consecutive_same_album(self):
-        # Equal-score tracks across two albums — output must alternate
-        tracks_a = [_make_track(f'a{i}', 'albumA', '2024-01-01', popularity=50)
+        # Tracks across two albums — output must alternate
+        tracks_a = [_make_track(f'a{i}', 'albumA', '2024-01-01')
                     for i in range(4)]
-        tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01', popularity=50)
+        tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01')
                     for i in range(4)]
-        selected = select_tracks_for_artist(tracks_a + tracks_b, 8, {}, {}, self.TODAY)
+        selected = select_tracks_for_artist(tracks_a + tracks_b, 8 * _TRACK_MS, {}, {}, self.TODAY)
         album_ids = [t['album_id'] for t in selected]
         for i in range(len(album_ids) - 1):
             assert album_ids[i] != album_ids[i + 1], \
@@ -390,14 +401,11 @@ class TestSelectTracksAlbumCap:
         # Simulates Good Kid / BCNR: all popularity=0, newest album wins on recency.
         # Three albums ensure enough supply for 9 slots despite cap=4.
         # Cap should prevent any single album from claiming all slots.
-        tracks_2026 = [_make_track(f'n{i}', 'new_album', '2026-01-01', popularity=0)
-                       for i in range(9)]
-        tracks_2023 = [_make_track(f'm{i}', 'mid_album', '2023-06-01', popularity=0)
-                       for i in range(9)]
-        tracks_2020 = [_make_track(f'o{i}', 'old_album', '2020-01-01', popularity=0)
-                       for i in range(9)]
+        tracks_2026 = [_make_track(f'n{i}', 'new_album', '2026-01-01') for i in range(9)]
+        tracks_2023 = [_make_track(f'm{i}', 'mid_album', '2023-06-01') for i in range(9)]
+        tracks_2020 = [_make_track(f'o{i}', 'old_album', '2020-01-01') for i in range(9)]
         selected = select_tracks_for_artist(
-            tracks_2026 + tracks_2023 + tracks_2020, 9, {}, {}, self.TODAY, max_per_album=4
+            tracks_2026 + tracks_2023 + tracks_2020, 9 * _TRACK_MS, {}, {}, self.TODAY, max_per_album=4
         )
         assert len(selected) == 9
         from_new = sum(1 for t in selected if t['album_id'] == 'new_album')

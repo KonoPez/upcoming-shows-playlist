@@ -40,9 +40,14 @@ class Config:
         default_factory=lambda: _env_str('TICKETMASTER_API_KEY')
     )
 
+    # Setlist.fm (optional — boosts tracks that regularly appear in live setlists)
+    setlist_fm_api_key: str = field(
+        default_factory=lambda: _env_str('SETLIST_FM_API_KEY')
+    )
+
     # Playlist tuning
     concert_window_days: int = 90
-    playlist_target_size: int = 60
+    playlist_target_duration_minutes: int = 120
     min_tracks_per_artist: int = 2
 
     @property
