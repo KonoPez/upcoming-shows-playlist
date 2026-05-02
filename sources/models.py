@@ -11,3 +11,4 @@ class Concert:
     venue: str
     source: str
     tm_spotify_id: Optional[str] = None  # Spotify artist ID if known from source metadata
+    is_opener: bool = False              # True for supporting acts found via Ticketmaster

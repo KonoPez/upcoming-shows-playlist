@@ -83,6 +83,7 @@ class TicketmasterClient:
                     venue=venue,
                     source='ticketmaster',
                     tm_spotify_id=item.get('spotify_id'),
+                    is_opener=True,
                 )
                 for item in cached
             ]
@@ -215,6 +216,7 @@ class TicketmasterClient:
                 venue=venue,
                 source='ticketmaster',
                 tm_spotify_id=spotify_id,
+                is_opener=True,
             ))
             logger.debug(f'Ticketmaster: found opener "{name}" for "{headliner}"')
 

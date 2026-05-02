@@ -18,12 +18,18 @@ without exceeding the target size.
 
 import math
 import logging
-from typing import Dict, List
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
+class ConcertSlot(NamedTuple):
+    days_until: int
+    is_opener: bool
+
+
 HALF_LIFE_DAYS = 21.0
 _LAMBDA = math.log(2) / HALF_LIFE_DAYS
+HEADLINER_BONUS = 1.5   # headliners receive 1.5× the base proximity weight vs openers
 
 
 def concert_weight(days_until: int) -> float:
@@ -36,31 +42,36 @@ def concert_weight(days_until: int) -> float:
     return math.exp(-_LAMBDA * days_until)
 
 
-def compute_artist_weights(
-    artist_concerts: Dict[str, List[int]]
-) -> Dict[str, float]:
+def compute_artist_weights(artist_concerts: dict[str, list[ConcertSlot]]) -> dict[str, float]:
     """
     Compute a raw weight for each artist.
 
-    artist_concerts: {spotify_artist_id: [days_until_concert, ...]}
-      An artist with two concerts — one in 10 days and one in 40 days —
-      gets the *sum* of both weights.
+    artist_concerts: {spotify_artist_id: [(days_until, is_opener), ...]}
+      Each entry is one concert appearance. An artist with two concerts —
+      one in 10 days and one in 40 days — gets the *sum* of both weights.
+      Headliner slots (is_opener=False) receive a HEADLINER_BONUS multiplier
+      so headliners claim a proportionally larger share than supporting acts.
+      An artist can be a headliner at one show and an opener at another; the
+      bonus is applied per concert, not per artist.
 
     Returns: {spotify_artist_id: raw_weight}
     """
-    weights: Dict[str, float] = {}
-    for artist_id, days_list in artist_concerts.items():
-        future = [d for d in days_list if d > 0]
-        if future:
-            weights[artist_id] = sum(concert_weight(d) for d in future)
+    weights = {}
+    for artist_id, concerts in artist_concerts.items():
+        total = sum(
+            concert_weight(s.days_until) * (1 if s.is_opener else HEADLINER_BONUS)
+            for s in concerts
+        )
+        if total > 0.0:
+            weights[artist_id] = total
     return weights
 
 
 def allocate_slots(
-    weights: Dict[str, float],
+    weights: dict[str, float],
     target_size: int,
     min_slots: int = 2,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Distribute `target_size` track slots across artists proportional to their weights.
 
@@ -82,10 +93,7 @@ def allocate_slots(
         return {}
 
     # Exact proportional allocation
-    exact: Dict[str, float] = {
-        aid: (w / total_weight) * target_size
-        for aid, w in weights.items()
-    }
+    exact = {aid: (w / total_weight) * target_size for aid, w in weights.items()}
 
     # Exclude artists whose share is too small to justify even min_slots
     qualified = {aid: e for aid, e in exact.items() if e >= min_slots}
@@ -96,20 +104,13 @@ def allocate_slots(
 
     # Recompute proportions over qualified artists only
     q_weight_total = sum(weights[a] for a in qualified)
-    exact_q: Dict[str, float] = {
-        aid: (weights[aid] / q_weight_total) * target_size
-        for aid in qualified
-    }
+    exact_q = {aid: (weights[aid] / q_weight_total) * target_size for aid in qualified}
 
     # Floor each value (enforce min_slots floor)
-    floors: Dict[str, int] = {
-        aid: max(min_slots, math.floor(v)) for aid, v in exact_q.items()
-    }
+    floors = {aid: max(min_slots, math.floor(v)) for aid, v in exact_q.items()}
 
     # Hamilton's method: distribute remaining slots by largest fractional remainder
-    remainders: Dict[str, float] = {
-        aid: exact_q[aid] - math.floor(exact_q[aid]) for aid in exact_q
-    }
+    remainders = {aid: exact_q[aid] - math.floor(exact_q[aid]) for aid in exact_q}
     leftover = target_size - sum(floors.values())
 
     for aid, _ in sorted(remainders.items(), key=lambda x: x[1], reverse=True):
@@ -118,13 +119,14 @@ def allocate_slots(
         floors[aid] += 1
         leftover -= 1
 
-    # If min_slots floors pushed us over budget, trim from lightest artists
-    while sum(floors.values()) > target_size:
-        for aid in sorted(weights, key=weights.__getitem__):
-            if sum(floors.values()) <= target_size:
-                break
-            if aid in floors and floors[aid] > min_slots:
-                floors[aid] -= 1
+    # If min_slots floors pushed us over budget, trim from lightest artists first
+    overage = sum(floors.values()) - target_size
+    for aid in sorted(floors, key=weights.get):
+        if overage <= 0:
+            break
+        trim = min(floors[aid] - min_slots, overage)
+        floors[aid] -= trim
+        overage -= trim
 
     logger.debug('Slot allocation:')
     for aid, slots in sorted(floors.items(), key=lambda x: -x[1]):

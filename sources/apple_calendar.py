@@ -11,6 +11,7 @@ Events are filtered by keyword heuristics to find likely concert events, then
 the artist name is extracted from the event title.
 """
 
+import concurrent.futures
 import logging
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -42,16 +43,21 @@ class AppleCalendarClient:
             )
             return []
 
-        try:
-            return self._fetch(start_date, end_date)
-        except Exception as e:
-            logger.error(f'Apple Calendar error: {e}')
-            if 'Unauthorized' in str(e) or '401' in str(e):
-                logger.info(
-                    'Apple Calendar tip: use an app-specific password from '
-                    'appleid.apple.com, not your regular Apple ID password.'
-                )
-            return []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._fetch, start_date, end_date)
+            try:
+                return future.result(timeout=60)
+            except concurrent.futures.TimeoutError:
+                logger.warning('Apple Calendar: timed out after 60s — skipping')
+                return []
+            except Exception as e:
+                logger.error(f'Apple Calendar error: {e}')
+                if 'Unauthorized' in str(e) or '401' in str(e):
+                    logger.info(
+                        'Apple Calendar tip: use an app-specific password from '
+                        'appleid.apple.com, not your regular Apple ID password.'
+                    )
+                return []
 
     def _fetch(self, start_date: date, end_date: date) -> list[Concert]:
         client = caldav.DAVClient(

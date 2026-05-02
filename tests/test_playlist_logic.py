@@ -9,6 +9,8 @@ import pytest
 
 from playlist_logic.weighting import (
     HALF_LIFE_DAYS,
+    HEADLINER_BONUS,
+    ConcertSlot,
     allocate_slots,
     compute_artist_weights,
     concert_weight,
@@ -50,30 +52,46 @@ class TestConcertWeight:
 # ── compute_artist_weights ────────────────────────────────────────────────────
 
 class TestComputeArtistWeights:
-    def test_single_artist_single_concert(self):
-        weights = compute_artist_weights({'a1': [10]})
+    def test_single_headliner_concert(self):
+        weights = compute_artist_weights({'a1': [ConcertSlot(10, False)]})
+        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+
+    def test_single_opener_concert(self):
+        weights = compute_artist_weights({'a1': [ConcertSlot(10, True)]})
         assert abs(weights['a1'] - concert_weight(10)) < 1e-9
 
     def test_multiple_concerts_for_same_artist_are_summed(self):
-        weights = compute_artist_weights({'a1': [10, 20]})
-        expected = concert_weight(10) + concert_weight(20)
+        weights = compute_artist_weights({'a1': [ConcertSlot(10, False), ConcertSlot(20, False)]})
+        expected = (concert_weight(10) + concert_weight(20)) * HEADLINER_BONUS
         assert abs(weights['a1'] - expected) < 1e-9
 
     def test_past_concerts_excluded(self):
-        weights = compute_artist_weights({'a1': [0, -1, -30]})
+        weights = compute_artist_weights({'a1': [ConcertSlot(0, False), ConcertSlot(-1, False), ConcertSlot(-30, False)]})
         assert 'a1' not in weights
 
     def test_mixed_past_and_future_only_sums_future(self):
-        weights = compute_artist_weights({'a1': [-5, 10]})
-        assert abs(weights['a1'] - concert_weight(10)) < 1e-9
+        weights = compute_artist_weights({'a1': [ConcertSlot(-5, False), ConcertSlot(10, False)]})
+        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
     def test_multiple_artists(self):
-        weights = compute_artist_weights({'a1': [7], 'a2': [30]})
+        weights = compute_artist_weights({'a1': [ConcertSlot(7, False)], 'a2': [ConcertSlot(30, False)]})
         assert 'a1' in weights and 'a2' in weights
         assert weights['a1'] > weights['a2']   # closer concert → heavier weight
 
     def test_empty_input(self):
         assert compute_artist_weights({}) == {}
+
+    def test_headliner_outweighs_opener_same_day(self):
+        # Same concert day — headliner should have a larger weight than opener.
+        weights = compute_artist_weights({'h': [ConcertSlot(14, False)], 'o': [ConcertSlot(14, True)]})
+        assert weights['h'] > weights['o']
+        assert abs(weights['h'] / weights['o'] - HEADLINER_BONUS) < 1e-9
+
+    def test_mixed_roles_bonus_applied_per_concert(self):
+        # Artist headlining in 11 days, opening in 33 days.
+        weights = compute_artist_weights({'a': [ConcertSlot(11, False), ConcertSlot(33, True)]})
+        expected = concert_weight(11) * HEADLINER_BONUS + concert_weight(33)
+        assert abs(weights['a'] - expected) < 1e-9
 
 
 # ── allocate_slots ────────────────────────────────────────────────────────────

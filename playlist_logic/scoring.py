@@ -20,7 +20,6 @@ Familiarity is computed from two sources, combined by taking the max:
 import logging
 import math
 from datetime import date
-from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +54,8 @@ def _recency_score(release_date: date, today: date) -> float:
 
 def _familiarity(
     track_id: str,
-    spotify_familiarity: Dict[str, float],
-    play_counts: Dict[str, int],
+    spotify_familiarity: dict[str, float],
+    play_counts: dict[str, int],
 ) -> float:
     """Combined familiarity from Spotify API signal and local play history."""
     api_score = spotify_familiarity.get(track_id, 0.0)
@@ -66,8 +65,8 @@ def _familiarity(
 
 def score_track(
     track: dict,
-    spotify_familiarity: Dict[str, float],
-    play_counts: Dict[str, int],
+    spotify_familiarity: dict[str, float],
+    play_counts: dict[str, int],
     today: date,
 ) -> float:
     """Return a composite score (0.0–1.0) for a single track."""
@@ -85,7 +84,7 @@ def score_track(
     return POPULARITY_W * popularity + RECENCY_W * recency + NOVELTY_W * novelty
 
 
-def _interleave_albums(tracks: List[dict]) -> List[dict]:
+def _interleave_albums(tracks: list[dict]) -> list[dict]:
     """
     Reorder tracks so no two consecutive tracks share the same album.
     Album groups are sorted newest-first by release date, then round-robined.
@@ -94,7 +93,7 @@ def _interleave_albums(tracks: List[dict]) -> List[dict]:
     if not tracks:
         return tracks
 
-    by_album: dict = {}
+    by_album = {}
     for t in tracks:
         aid = t.get('album_id') or ''
         by_album.setdefault(aid, []).append(t)
@@ -117,13 +116,13 @@ def _interleave_albums(tracks: List[dict]) -> List[dict]:
 
 
 def select_tracks_for_artist(
-    tracks: List[dict],
+    tracks: list[dict],
     num_slots: int,
-    spotify_familiarity: Dict[str, float],
-    play_counts: Dict[str, int],
+    spotify_familiarity: dict[str, float],
+    play_counts: dict[str, int],
     today: date,
     max_per_album: int = 6,
-) -> List[dict]:
+) -> list[dict]:
     """
     Score all tracks for an artist and return the top `num_slots`.
 

@@ -14,6 +14,8 @@ from cache import Cache
 logger = logging.getLogger(__name__)
 
 ARTIST_TRACKS_TTL = 30 * 24 * 3600   # 30 days — discographies don't change fast
+FAMILIARITY_TTL = 6 * 3600            # 6 hours — top tracks don't shift meaningfully intra-day
+RECENTLY_PLAYED_TTL = 5 * 60          # 5 min — deduplicates the two callers within a single run
 API_DELAY = 0.1                        # 100 ms between calls
 MAX_ALBUMS_PER_ARTIST = 15            # most recent studio albums + singles
 
@@ -41,9 +43,8 @@ class SpotifyClient:
         if playlist_id:
             try:
                 pl = self.sp.playlist(playlist_id, fields='id,name')
-                if pl and pl.get('id'):
-                    logger.info(f'Using playlist: "{pl["name"]}" ({pl["id"]})')
-                    return pl['id']
+                logger.info(f'Using playlist: "{pl["name"]}" ({pl["id"]})')
+                return pl['id']
             except Exception:
                 logger.warning(
                     f'Playlist {playlist_id} not found or inaccessible — creating a new one.'
@@ -83,9 +84,29 @@ class SpotifyClient:
 
     # ── User listening history ────────────────────────────────────────────────
 
-    def get_user_familiarity(self) -> dict[str, float]:
+    def _get_recently_played_raw(self, cache: Cache) -> list[dict]:
+        """
+        Fetch the raw recently-played items from Spotify, cached for
+        RECENTLY_PLAYED_TTL so the two callers within a single run share one call.
+        """
+        cache_key = 'recently_played_raw'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            result = self.sp.current_user_recently_played(limit=50)
+            items = result.get('items', [])
+            cache.set(cache_key, items, RECENTLY_PLAYED_TTL)
+            return items
+        except Exception as e:
+            logger.warning(f'Failed to fetch recently played: {e}')
+            return []
+
+    def get_user_familiarity(self, cache: Cache) -> dict[str, float]:
         """
         Build a {track_id: familiarity_score} map from Spotify's API signals.
+        Result is cached for FAMILIARITY_TTL (6 h) — top-track lists don't
+        shift meaningfully within a day, and this avoids 4 API calls on re-runs.
 
         Scores:
           short_term top tracks (≈4 weeks)   → 1.0
@@ -94,6 +115,11 @@ class SpotifyClient:
           recently played                     → 0.5
         Tracks in multiple lists get the highest score.
         """
+        cache_key = 'user_familiarity'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         familiarity: dict[str, float] = {}
 
         for time_range, score in [
@@ -111,38 +137,32 @@ class SpotifyClient:
             except Exception as e:
                 logger.warning(f'Failed to fetch top tracks ({time_range}): {e}')
 
-        try:
-            result = self.sp.current_user_recently_played(limit=50)
-            for item in result.get('items', []):
-                tid = item.get('track', {}).get('id')
-                if tid:
-                    familiarity[tid] = max(familiarity.get(tid, 0.0), 0.5)
-        except Exception as e:
-            logger.warning(f'Failed to fetch recently played: {e}')
+        for item in self._get_recently_played_raw(cache):
+            tid = item.get('track', {}).get('id')
+            if tid:
+                familiarity[tid] = max(familiarity.get(tid, 0.0), 0.5)
 
+        cache.set(cache_key, familiarity, FAMILIARITY_TTL)
         return familiarity
 
-    def get_recently_played_with_artists(self) -> list[dict]:
+    def get_recently_played_with_artists(self, cache: Cache) -> list[dict]:
         """
         Return play events for local history accumulation.
         Each entry: {track_id, artist_id, played_at}.
+        Reuses the recently-played response cached by _get_recently_played_raw.
         """
         plays: list[dict] = []
-        try:
-            result = self.sp.current_user_recently_played(limit=50)
-            for item in result.get('items', []):
-                track = item.get('track', {})
-                track_id = track.get('id')
-                played_at = item.get('played_at', '')
-                artists = track.get('artists', [])
-                if track_id and played_at and artists:
-                    plays.append({
-                        'track_id': track_id,
-                        'artist_id': artists[0].get('id', ''),
-                        'played_at': played_at,
-                    })
-        except Exception as e:
-            logger.warning(f'Failed to fetch recently played for history: {e}')
+        for item in self._get_recently_played_raw(cache):
+            track = item.get('track', {})
+            track_id = track.get('id')
+            played_at = item.get('played_at', '')
+            artists = track.get('artists', [])
+            if track_id and played_at and artists:
+                plays.append({
+                    'track_id': track_id,
+                    'artist_id': artists[0].get('id', ''),
+                    'played_at': played_at,
+                })
         return plays
 
     # ── Artist discography ────────────────────────────────────────────────────
@@ -256,46 +276,46 @@ class SpotifyClient:
         """Return the most recent MAX_ALBUMS_PER_ARTIST albums + singles."""
         import logging as _logging
         _spotipy_logger = _logging.getLogger('spotipy.client')
+        _orig_level = _spotipy_logger.level
+        # Suppress spotipy's ERROR logs for the entire method — we handle all
+        # errors ourselves (400 limit retries log at DEBUG, others at WARNING).
+        _spotipy_logger.setLevel(_logging.CRITICAL)
 
         albums: list[dict] = []
         offset = 0
         limit = 20
-        _suppress_spotipy = False
 
-        while len(albums) < MAX_ALBUMS_PER_ARTIST * 2:  # over-fetch, then trim
-            if _suppress_spotipy:
-                _spotipy_logger.setLevel(_logging.CRITICAL)
-            try:
-                # Embed params in the URL string rather than passing as kwargs.
-                # When kwargs are passed, requests.urlencode encodes the comma in
-                # "album,single" as %2C, which Spotify rejects with a 400 error.
-                # An inline query string is left unmodified by requests.
-                result = self.sp._get(
-                    f'artists/{artist_id}/albums'
-                    f'?include_groups=album,single&limit={limit}&offset={offset}'
-                )
-                _spotipy_logger.setLevel(_logging.NOTSET)
-                _suppress_spotipy = False
-                items = result.get('items', [])
-                if not items:
+        try:
+            while len(albums) < MAX_ALBUMS_PER_ARTIST * 2:  # over-fetch, then trim
+                try:
+                    # Embed params in the URL string rather than passing as kwargs.
+                    # When kwargs are passed, requests.urlencode encodes the comma in
+                    # "album,single" as %2C, which Spotify rejects with a 400 error.
+                    # An inline query string is left unmodified by requests.
+                    result = self.sp._get(
+                        f'artists/{artist_id}/albums'
+                        f'?include_groups=album,single&limit={limit}&offset={offset}'
+                    )
+                    items = result.get('items', [])
+                    if not items:
+                        break
+                    albums.extend(items)
+                    if result.get('next') is None:
+                        break
+                    offset += limit
+                    time.sleep(API_DELAY)
+                except Exception as e:
+                    # Some Spotify artist profiles have a non-standard limit cap
+                    # (e.g. limit=20 returns 400 "Invalid limit" but limit=10 works).
+                    # Halve the limit and retry rather than giving up immediately.
+                    if limit > 1 and getattr(e, 'http_status', None) == 400:
+                        limit //= 2
+                        logger.debug(f'Albums fetch for {artist_id}: limit capped, retrying with limit={limit}')
+                        continue
+                    logger.warning(f'Failed to fetch albums for {artist_id}: {e}')
                     break
-                albums.extend(items)
-                if result.get('next') is None:
-                    break
-                offset += limit
-                time.sleep(API_DELAY)
-            except Exception as e:
-                _spotipy_logger.setLevel(_logging.NOTSET)
-                # Some Spotify artist profiles have a non-standard limit cap
-                # (e.g. limit=20 returns 400 "Invalid limit" but limit=10 works).
-                # Halve the limit and retry rather than giving up immediately.
-                if limit > 1 and getattr(e, 'http_status', None) == 400:
-                    limit //= 2
-                    _suppress_spotipy = True
-                    logger.debug(f'Albums fetch for {artist_id}: limit capped, retrying with limit={limit}')
-                    continue
-                logger.warning(f'Failed to fetch albums for {artist_id}: {e}')
-                break
+        finally:
+            _spotipy_logger.setLevel(_orig_level)
 
         # Sort newest-first, deduplicate by normalised name (avoid remaster dupes)
         def sort_key(a: dict) -> str:
@@ -348,12 +368,15 @@ class SpotifyClient:
 
         Uses _get() directly to avoid spotipy's tracks() wrapper passing
         market=None as a query parameter, which Spotify rejects with 403.
+        market=from_token filters results to the authenticated user's market,
+        which also avoids 403s on market-restricted catalogues (e.g. small
+        independent artists whose releases are region-locked).
         """
         result: dict[str, int] = {}
         for i in range(0, len(track_ids), 50):
             batch = track_ids[i:i + 50]
             try:
-                data = self.sp._get(f'tracks?ids={",".join(batch)}')
+                data = self.sp._get(f'tracks?ids={",".join(batch)}&market=from_token')
                 for t in data.get('tracks', []):
                     if t and t.get('id'):
                         result[t['id']] = t.get('popularity', 0)

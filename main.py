@@ -26,7 +26,7 @@ from sources.google_calendar import GoogleCalendarClient
 from spotify_client.client import SpotifyClient
 from spotify_client.auth import get_spotify_client
 from spotify_client.client import SpotifyClient
-from playlist_logic.weighting import compute_artist_weights, allocate_slots
+from playlist_logic.weighting import compute_artist_weights, allocate_slots, ConcertSlot
 from playlist_logic.scoring import select_tracks_for_artist
 
 logging.basicConfig(
@@ -243,15 +243,15 @@ def cmd_build(dry_run: bool = False) -> None:
 
     # 3. Accumulate play history (run every time so familiarity improves weekly)
     logger.info('Syncing play history…')
-    plays = sp.get_recently_played_with_artists()
+    plays = sp.get_recently_played_with_artists(cache)
     new_plays = cache.record_plays(plays)
     logger.info(f'Recorded {new_plays} new play events')
 
     # 4. Resolve each artist name → Spotify artist ID; deduplicate concerts
     logger.info('Resolving artists to Spotify profiles…')
-    artist_names: dict[str, str] = {}           # spotify_id → display name
-    artist_days: dict[str, list[int]] = {}      # spotify_id → [days_until_concert, …]
-    seen: set[tuple[str, date]] = set()         # (spotify_id, date) dedup key
+    artist_names: dict[str, str] = {}
+    artist_concerts: dict[str, list[ConcertSlot]] = {}
+    seen: set[tuple[str, date]] = set()
 
     for concert in concerts:
         spotify_id = resolve_artist(
@@ -270,15 +270,15 @@ def cmd_build(dry_run: bool = False) -> None:
 
         days_until = (concert.event_date - today).days
         artist_names[spotify_id] = concert.artist_name
-        artist_days.setdefault(spotify_id, []).append(days_until)
+        artist_concerts.setdefault(spotify_id, []).append(ConcertSlot(days_until, concert.is_opener))
 
-    logger.info(f'Resolved {len(artist_days)} unique artists')
-    if not artist_days:
+    logger.info(f'Resolved {len(artist_concerts)} unique artists')
+    if not artist_concerts:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
 
     # 5. Compute weights and allocate track slots
-    weights = compute_artist_weights(artist_days)
+    weights = compute_artist_weights(artist_concerts)
     slots = allocate_slots(
         weights,
         target_size=config.playlist_target_size,
@@ -287,7 +287,7 @@ def cmd_build(dry_run: bool = False) -> None:
 
     # 6. Get user familiarity from Spotify API
     logger.info('Fetching Spotify listening history…')
-    spotify_familiarity = sp.get_user_familiarity()
+    spotify_familiarity = sp.get_user_familiarity(cache)
 
     # 7. Select tracks per artist
     selected_by_artist: dict[str, list[dict]] = {}
@@ -313,12 +313,15 @@ def cmd_build(dry_run: bool = False) -> None:
         logger.info(
             f'  {name}: {len(chosen)}/{num_slots} tracks selected '
             f'(from {len(tracks)} in discography, '
-            f'concert in {min(artist_days[artist_id])}d)'
+            f'concert in {min(s.days_until for s in artist_concerts[artist_id])}d)'
         )
 
     # 8. Flatten to ordered track list (nearest concert first)
+    def nearest(artist_id: str) -> int:
+        return min(s.days_until for s in artist_concerts[artist_id])
+
     all_tracks: list[dict] = []
-    for artist_id in sorted(slots, key=lambda a: min(artist_days[a])):
+    for artist_id in sorted(slots, key=nearest):
         all_tracks.extend(selected_by_artist.get(artist_id, []))
 
     track_uris = [f'spotify:track:{t["id"]}' for t in all_tracks]
@@ -327,9 +330,9 @@ def cmd_build(dry_run: bool = False) -> None:
     # 9. Dry run: print summary and exit
     if dry_run:
         print(f'\n=== DRY RUN — {total} tracks from {len(selected_by_artist)} artists ===\n')
-        for artist_id in sorted(slots, key=lambda a: min(artist_days[a])):
+        for artist_id in sorted(slots, key=nearest):
             name = artist_names.get(artist_id, artist_id)
-            days = min(artist_days[artist_id])
+            days = nearest(artist_id)
             chosen = selected_by_artist.get(artist_id, [])
             print(f'{name}  ({len(chosen)} tracks, concert in {days}d):')
             for t in chosen:

@@ -179,12 +179,15 @@ class TestGetPopularityBatch:
         client.sp._get.assert_called_once()
         client.sp.tracks.assert_not_called()
 
-    def test_ids_embedded_in_url(self):
+    def test_ids_embedded_in_url_with_user_market(self):
+        # IDs must be in the URL (not kwargs) and market=from_token must be present.
+        # market=from_token avoids 403s on market-restricted catalogues; market=None
+        # (the spotipy wrapper default) was the original source of 403 errors.
         client = self._client_with_get([])
         client._get_popularity_batch(['id1', 'id2', 'id3'])
         url = client.sp._get.call_args[0][0]
         assert 'id1,id2,id3' in url
-        assert 'market' not in url
+        assert 'market=from_token' in url
 
     def test_returns_popularity_by_track_id(self):
         client = self._client_with_get([
