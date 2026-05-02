@@ -10,6 +10,7 @@ from typing import Optional
 import spotipy
 
 from cache import Cache
+from sources.models import Track
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class SpotifyClient:
 
     # ── User listening history ────────────────────────────────────────────────
 
-    def _get_recently_played_raw(self, cache: Cache) -> list[dict]:
+    def _get_recently_played_raw(self, cache: Cache) -> list[Track]:
         """
         Fetch the raw recently-played items from Spotify, cached for
         RECENTLY_PLAYED_TTL so the two callers within a single run share one call.
@@ -145,7 +146,7 @@ class SpotifyClient:
         cache.set(cache_key, familiarity, FAMILIARITY_TTL)
         return familiarity
 
-    def get_recently_played_with_artists(self, cache: Cache) -> list[dict]:
+    def get_recently_played_with_artists(self, cache: Cache) -> list[Track]:
         """
         Return play events for local history accumulation.
         Each entry: {track_id, artist_id, played_at}.
@@ -167,22 +168,16 @@ class SpotifyClient:
 
     # ── Artist discography ────────────────────────────────────────────────────
 
-    def get_artist_tracks(self, artist_id: str, cache: Cache) -> list[dict]:
-        """
-        Return a list of track dicts for an artist's discography.
-        Cached for ARTIST_TRACKS_TTL.
-
-        Each track dict: {id, name, popularity, album_id, album_name,
-                          release_date, release_date_precision, duration_ms}
-        """
+    def get_artist_tracks(self, artist_id: str, cache: Cache) -> list[Track]:
+        """Return tracks for an artist's discography. Cached for ARTIST_TRACKS_TTL."""
         cache_key = f'artist_tracks:{artist_id}'
         cached = cache.get(cache_key)
         if cached is not None:
-            return cached
+            return [Track.from_dict(t) for t in cached]
 
         tracks = self._fetch_artist_tracks(artist_id)
         if tracks:
-            cache.set(cache_key, tracks, ARTIST_TRACKS_TTL)
+            cache.set(cache_key, [t.to_dict() for t in tracks], ARTIST_TRACKS_TTL)
         return tracks
 
     # Album names that indicate the entire album is a non-studio recording.
@@ -215,64 +210,57 @@ class SpotifyClient:
             or self._VARIANT_TRACK_RE.search(track_name)
         )
 
-    def _fetch_artist_tracks(self, artist_id: str) -> list[dict]:
+    def _fetch_artist_tracks(self, artist_id: str) -> list[Track]:
         albums = self._get_artist_albums(artist_id)
         if not albums:
             return []
 
         # Collect tracks, deduplicating by normalised name (keeps newest version)
-        by_name: dict[str, dict] = {}
+        by_name: dict[str, Track] = {}
 
         for album in albums:
-            album_meta = {
-                'album_id': album['id'],
-                'album_name': album.get('name', ''),
-                'release_date': album.get('release_date', ''),
-                'release_date_precision': album.get('release_date_precision', 'year'),
-            }
-            release_date = album_meta['release_date']
+            album_id = album['id']
+            album_name = album.get('name', '')
+            release_date = album.get('release_date', '')
+            release_date_precision = album.get('release_date_precision', 'year')
 
-            for track in self._get_album_tracks(album['id']):
+            for track in self._get_album_tracks(album_id):
                 tid = track.get('id')
                 if not tid:
                     continue
 
                 track_name = track.get('name', '')
-                if self._is_variant_recording(track_name, album_meta['album_name']):
-                    logger.debug(f'Skipping variant recording: "{track_name}" ({album_meta["album_name"]})')
+                if self._is_variant_recording(track_name, album_name):
+                    logger.debug(f'Skipping variant recording: "{track_name}" ({album_name})')
                     continue
 
                 name_key = track_name.lower().strip()
                 existing = by_name.get(name_key)
 
                 # Keep the version from the most recently released album
-                if existing and existing['release_date'] >= release_date:
+                if existing and existing.release_date >= release_date:
                     continue
 
-                by_name[name_key] = {
-                    'id': tid,
-                    'name': track_name,
-                    'duration_ms': track.get('duration_ms', 0),
-                    'popularity': 0,   # filled by batch call below
-                    **album_meta,
-                }
+                by_name[name_key] = Track(
+                    id=tid,
+                    name=track_name,
+                    duration_ms=track.get('duration_ms', 0),
+                    album_id=album_id,
+                    album_name=album_name,
+                    release_date=release_date,
+                    release_date_precision=release_date_precision,
+                )
 
         if not by_name:
             return []
 
-        # Batch-fetch popularity scores
         all_tracks = list(by_name.values())
-        track_ids = [t['id'] for t in all_tracks]
-        popularity = self._get_popularity_batch(track_ids)
-        for t in all_tracks:
-            t['popularity'] = popularity.get(t['id'], 0)
-
         logger.debug(
             f'Artist {artist_id}: {len(all_tracks)} tracks from {len(albums)} albums'
         )
         return all_tracks
 
-    def _get_artist_albums(self, artist_id: str) -> list[dict]:
+    def _get_artist_albums(self, artist_id: str) -> list[Track]:
         """Return the most recent MAX_ALBUMS_PER_ARTIST albums + singles."""
         import logging as _logging
         _spotipy_logger = _logging.getLogger('spotipy.client')
@@ -346,7 +334,7 @@ class SpotifyClient:
 
         return deduped
 
-    def _get_album_tracks(self, album_id: str) -> list[dict]:
+    def _get_album_tracks(self, album_id: str) -> list[Track]:
         tracks: list[dict] = []
         offset = 0
         while True:
@@ -363,24 +351,3 @@ class SpotifyClient:
                 break
         return tracks
 
-    def _get_popularity_batch(self, track_ids: list[str]) -> dict[str, int]:
-        """Batch-fetch popularity for up to 50 track IDs at a time.
-
-        Uses _get() directly to avoid spotipy's tracks() wrapper passing
-        market=None as a query parameter, which Spotify rejects with 403.
-        market=from_token filters results to the authenticated user's market,
-        which also avoids 403s on market-restricted catalogues (e.g. small
-        independent artists whose releases are region-locked).
-        """
-        result: dict[str, int] = {}
-        for i in range(0, len(track_ids), 50):
-            batch = track_ids[i:i + 50]
-            try:
-                data = self.sp._get(f'tracks?ids={",".join(batch)}&market=from_token')
-                for t in data.get('tracks', []):
-                    if t and t.get('id'):
-                        result[t['id']] = t.get('popularity', 0)
-                time.sleep(API_DELAY)
-            except Exception as e:
-                logger.warning(f'Failed to fetch track details: {e}')
-        return result

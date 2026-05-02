@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sources.models import Track
 from sources.setlist import SetlistClient, _normalize_title, _parse_setlist_date, MAX_SHOWS
 from playlist_logic.scoring import SETLIST_W, score_track, select_tracks_for_artist
 
@@ -29,16 +30,16 @@ def _make_cache(stored=None) -> MagicMock:
     return cache
 
 
-def _make_track(name: str, album_id: str = 'a1') -> dict:
-    return {
-        'id': name.lower().replace(' ', '_'),
-        'name': name,
-        'album_id': album_id,
-        'album_name': 'Album',
-        'release_date': '2020-01-01',
-        'release_date_precision': 'day',
-        'duration_ms': 200_000,
-    }
+def _make_track(name: str, album_id: str = 'a1') -> Track:
+    return Track(
+        id=name.lower().replace(' ', '_'),
+        name=name,
+        album_id=album_id,
+        album_name='Album',
+        release_date='2020-01-01',
+        release_date_precision='day',
+        duration_ms=200_000,
+    )
 
 
 # ── _normalize_title ──────────────────────────────────────────────────────────
@@ -233,7 +234,7 @@ class TestSelectTracksSetlistIntegration:
             setlist_scores={'setlist hit': 1.0},
         )
         # Both fit in budget, but setlist hit should appear first after interleaving
-        names = [t['name'] for t in chosen]
+        names = [t.name for t in chosen]
         assert 'Setlist Hit' in names
         assert 'Deep Cut' in names
         assert names.index('Setlist Hit') < names.index('Deep Cut')

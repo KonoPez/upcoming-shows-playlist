@@ -26,7 +26,9 @@ Familiarity is computed from two sources, combined by taking the max:
 import logging
 import math
 from datetime import date
-from typing import Optional  # noqa: F401 — used in Optional[dict] annotations
+from typing import Optional
+
+from sources.models import Track
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ def _familiarity(
 
 
 def score_track(
-    track: dict,
+    track: Track,
     spotify_familiarity: dict,
     play_counts: dict,
     today: date,
@@ -93,24 +95,20 @@ def score_track(
     With real setlist data, recency is reduced so older staples aren't unfairly
     penalised relative to new tracks.
     """
-    release_date = _parse_release_date(
-        track.get('release_date', '2000-01-01'),
-        track.get('release_date_precision', 'year'),
-    )
+    release_date = _parse_release_date(track.release_date, track.release_date_precision)
     recency = _recency_score(release_date, today)
 
-    fam = _familiarity(track.get('id', ''), spotify_familiarity, play_counts)
+    fam = _familiarity(track.id, spotify_familiarity, play_counts)
     novelty = 1.0 - fam
 
     if setlist_scores:
-        name_key = track.get('name', '').lower().strip()
-        freq = setlist_scores.get(name_key, 0.0)
+        freq = setlist_scores.get(track.name.lower().strip(), 0.0)
         return SETLIST_W * freq + RECENCY_W * recency + NOVELTY_W * novelty
 
     return RECENCY_W_FALLBACK * recency + NOVELTY_W * novelty
 
 
-def _interleave_albums(tracks: list[dict]) -> list[dict]:
+def _interleave_albums(tracks: list[Track]) -> list[Track]:
     """
     Reorder tracks so no two consecutive tracks share the same album.
     Album groups are sorted newest-first by release date, then round-robined.
@@ -119,17 +117,16 @@ def _interleave_albums(tracks: list[dict]) -> list[dict]:
     if not tracks:
         return tracks
 
-    by_album = {}
+    by_album: dict[str, list[Track]] = {}
     for t in tracks:
-        aid = t.get('album_id') or ''
-        by_album.setdefault(aid, []).append(t)
+        by_album.setdefault(t.album_id, []).append(t)
 
     if len(by_album) <= 1:
         return tracks
 
     # Sort album groups newest-first so the interleaved order leads with new material
-    def _album_date(items: list) -> str:
-        return max(t.get('release_date', '') for t in items)
+    def _album_date(items: list[Track]) -> str:
+        return max(t.release_date for t in items)
 
     groups = sorted(by_album.values(), key=_album_date, reverse=True)
 
@@ -142,14 +139,14 @@ def _interleave_albums(tracks: list[dict]) -> list[dict]:
 
 
 def select_tracks_for_artist(
-    tracks: list,
+    tracks: list[Track],
     duration_budget_ms: int,
     spotify_familiarity: dict,
     play_counts: dict,
     today: date,
     max_per_album: int = 6,
     setlist_scores: Optional[dict] = None,
-) -> list:
+) -> list[Track]:
     """
     Score all tracks for an artist and greedily select them until the
     cumulative duration reaches `duration_budget_ms`.
@@ -170,17 +167,16 @@ def select_tracks_for_artist(
     scored.sort(key=lambda x: x[0], reverse=True)
 
     # Greedy selection with per-album cap, stopping when duration budget is reached
-    album_counts: dict = {}
-    selected = []
+    album_counts: dict[str, int] = {}
+    selected: list[Track] = []
     total_ms = 0
     for _, t in scored:
         if total_ms >= duration_budget_ms:
             break
-        aid = t.get('album_id') or ''
-        if not aid or album_counts.get(aid, 0) < max_per_album:
+        if not t.album_id or album_counts.get(t.album_id, 0) < max_per_album:
             selected.append(t)
-            total_ms += t.get('duration_ms', 0)
-            if aid:
-                album_counts[aid] = album_counts.get(aid, 0) + 1
+            total_ms += t.duration_ms
+            if t.album_id:
+                album_counts[t.album_id] = album_counts.get(t.album_id, 0) + 1
 
     return _interleave_albums(selected)

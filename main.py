@@ -329,7 +329,7 @@ def cmd_build(dry_run: bool = False) -> None:
             setlist_scores=setlist_scores,
         )
         selected_by_artist[artist_id] = chosen
-        chosen_ms = sum(t.get('duration_ms', 0) for t in chosen)
+        chosen_ms = sum(t.duration_ms for t in chosen)
         logger.info(
             f'  {name}: {len(chosen)} tracks (~{chosen_ms // 60_000}m of {duration_budget_ms // 60_000}m budget, '
             f'{len(tracks)} in discography, '
@@ -344,9 +344,9 @@ def cmd_build(dry_run: bool = False) -> None:
     for artist_id in sorted(slots, key=nearest):
         all_tracks.extend(selected_by_artist.get(artist_id, []))
 
-    track_uris = [f'spotify:track:{t["id"]}' for t in all_tracks]
+    track_uris = [f'spotify:track:{t.id}' for t in all_tracks]
     total = len(track_uris)
-    total_ms = sum(t.get('duration_ms', 0) for t in all_tracks)
+    total_ms = sum(t.duration_ms for t in all_tracks)
     total_min = total_ms // 60_000
 
     # 9. Dry run: print summary and exit
@@ -356,15 +356,15 @@ def cmd_build(dry_run: bool = False) -> None:
             name = artist_names.get(artist_id, artist_id)
             days = nearest(artist_id)
             chosen = selected_by_artist.get(artist_id, [])
-            chosen_min = sum(t.get('duration_ms', 0) for t in chosen) // 60_000
+            chosen_min = sum(t.duration_ms for t in chosen) // 60_000
             print(f'{name}  ({len(chosen)} tracks, ~{chosen_min}m, concert in {days}d):')
             scores = setlist_by_artist.get(artist_id, {})
             for t in chosen:
-                release = t.get('release_date', '?')[:4]
-                dur = t.get('duration_ms', 0) // 1000
-                freq = scores.get(t.get('name', '').lower().strip())
+                release = (t.release_date or '?')[:4]
+                dur = t.duration_ms // 1000
+                freq = scores.get(t.name.lower().strip())
                 freq_str = f'{freq:.0%}' if freq is not None else '  —'
-                print(f'  [{freq_str:>4}] {t["name"]}  ({t.get("album_name", "")}, {release}) [{dur//60}:{dur%60:02d}]')
+                print(f'  [{freq_str:>4}] {t.name}  ({t.album_name}, {release}) [{dur//60}:{dur%60:02d}]')
             print()
         return
 

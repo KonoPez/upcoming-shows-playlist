@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from sources.models import Track
 from playlist_logic.weighting import (
     HALF_LIFE_DAYS,
     HEADLINER_BONUS,
@@ -225,14 +226,16 @@ class TestFamiliarity:
 class TestScoreTrack:
     TODAY = date(2024, 1, 1)
 
-    def _track(self, popularity=50, release_date='2000-01-01', track_id='t1'):
-        return {
-            'id': track_id,
-            'name': 'Test Track',
-            'popularity': popularity,
-            'release_date': release_date,
-            'release_date_precision': 'day',
-        }
+    def _track(self, release_date='2000-01-01', track_id='t1'):
+        return Track(
+            id=track_id,
+            name='Test Track',
+            release_date=release_date,
+            release_date_precision='day',
+            duration_ms=0,
+            album_id='',
+            album_name='',
+        )
 
     def test_score_in_unit_range(self):
         score = score_track(self._track(), {}, {}, self.TODAY)
@@ -273,13 +276,15 @@ class TestSelectTracksForArtist:
     def _tracks(self, n, release_date='2000-01-01'):
         """Create n tracks all sharing the same release date."""
         return [
-            {
-                'id': f't{i}',
-                'name': f'Track {i}',
-                'release_date': release_date,
-                'release_date_precision': 'day',
-                'duration_ms': _TRACK_MS,
-            }
+            Track(
+                id=f't{i}',
+                name=f'Track {i}',
+                release_date=release_date,
+                release_date_precision='day',
+                duration_ms=_TRACK_MS,
+                album_id='',
+                album_name='',
+            )
             for i in range(1, n + 1)
         ]
 
@@ -304,7 +309,7 @@ class TestSelectTracksForArtist:
         tracks = self._tracks(5)
         familiarity = {f't{i}': 1.0 for i in range(1, 5)}   # t1–t4 familiar
         selected = select_tracks_for_artist(tracks, 1 * _TRACK_MS, familiarity, {}, self.TODAY)
-        assert selected[0]['id'] == 't5'
+        assert selected[0].id == 't5'
 
     def test_result_ordered_best_first(self):
         # Tracks with higher setlist frequency should be selected first
@@ -312,22 +317,22 @@ class TestSelectTracksForArtist:
         setlist = {f'track {i}': i / 10 for i in range(1, 6)}   # track 5 → 0.5, track 1 → 0.1
         selected = select_tracks_for_artist(tracks, 3 * _TRACK_MS, {}, {}, self.TODAY,
                                             setlist_scores=setlist)
-        ids = [t['id'] for t in selected]
+        ids = [t.id for t in selected]
         assert ids == ['t5', 't4', 't3']   # highest setlist frequency first
 
 
 # ── _interleave_albums ────────────────────────────────────────────────────────
 
-def _make_track(tid: str, album_id: str, release_date: str) -> dict:
-    return {
-        'id': tid,
-        'name': f'Track {tid}',
-        'release_date': release_date,
-        'release_date_precision': 'day',
-        'album_id': album_id,
-        'album_name': f'Album {album_id}',
-        'duration_ms': _TRACK_MS,
-    }
+def _make_track(tid: str, album_id: str, release_date: str) -> Track:
+    return Track(
+        id=tid,
+        name=f'Track {tid}',
+        release_date=release_date,
+        release_date_precision='day',
+        album_id=album_id,
+        album_name=f'Album {album_id}',
+        duration_ms=_TRACK_MS,
+    )
 
 
 class TestInterleaveAlbums:
@@ -342,7 +347,7 @@ class TestInterleaveAlbums:
         a_tracks = [_make_track(f'a{i}', 'albumA', '2024-01-01') for i in range(3)]
         b_tracks = [_make_track(f'b{i}', 'albumB', '2023-01-01') for i in range(3)]
         result = _interleave_albums(a_tracks + b_tracks)
-        album_ids = [t['album_id'] for t in result]
+        album_ids = [t.album_id for t in result]
         for i in range(len(album_ids) - 1):
             assert album_ids[i] != album_ids[i + 1]
 
@@ -350,7 +355,7 @@ class TestInterleaveAlbums:
         old = [_make_track('o1', 'old', '2020-01-01')]
         new = [_make_track('n1', 'new', '2024-01-01')]
         result = _interleave_albums(old + new)
-        assert result[0]['album_id'] == 'new'
+        assert result[0].album_id == 'new'
 
     def test_unequal_album_sizes_minimizes_consecutive_pairs(self):
         # 3 from A, 1 from B — some consecutive pairs are unavoidable (best is [A,B,A,A]),
@@ -358,7 +363,7 @@ class TestInterleaveAlbums:
         a_tracks = [_make_track(f'a{i}', 'albumA', '2024-01-01') for i in range(3)]
         b_tracks = [_make_track('b0', 'albumB', '2023-01-01')]
         result = _interleave_albums(a_tracks + b_tracks)
-        album_ids = [t['album_id'] for t in result]
+        album_ids = [t.album_id for t in result]
         consecutive_pairs = sum(
             1 for i in range(len(album_ids) - 1) if album_ids[i] == album_ids[i + 1]
         )
@@ -382,8 +387,8 @@ class TestSelectTracksAlbumCap:
             tracks_a + tracks_b, 6 * _TRACK_MS, {}, {}, self.TODAY, max_per_album=4
         )
         assert len(selected) == 6
-        assert sum(1 for t in selected if t['album_id'] == 'albumA') == 4
-        assert sum(1 for t in selected if t['album_id'] == 'albumB') == 2
+        assert sum(1 for t in selected if t.album_id == 'albumA') == 4
+        assert sum(1 for t in selected if t.album_id == 'albumB') == 2
 
     def test_no_consecutive_same_album(self):
         # Tracks across two albums — output must alternate
@@ -392,7 +397,7 @@ class TestSelectTracksAlbumCap:
         tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01')
                     for i in range(4)]
         selected = select_tracks_for_artist(tracks_a + tracks_b, 8 * _TRACK_MS, {}, {}, self.TODAY)
-        album_ids = [t['album_id'] for t in selected]
+        album_ids = [t.album_id for t in selected]
         for i in range(len(album_ids) - 1):
             assert album_ids[i] != album_ids[i + 1], \
                 f'Consecutive same album at positions {i},{i+1}: {album_ids}'
@@ -408,5 +413,5 @@ class TestSelectTracksAlbumCap:
             tracks_2026 + tracks_2023 + tracks_2020, 9 * _TRACK_MS, {}, {}, self.TODAY, max_per_album=4
         )
         assert len(selected) == 9
-        from_new = sum(1 for t in selected if t['album_id'] == 'new_album')
+        from_new = sum(1 for t in selected if t.album_id == 'new_album')
         assert from_new <= 4   # newest album is capped; older albums fill the rest
