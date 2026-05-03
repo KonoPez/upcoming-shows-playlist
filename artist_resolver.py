@@ -12,7 +12,6 @@ with the wrong artist's tracks. The strategy is:
 import logging
 import re
 from typing import Optional
-
 import spotipy
 
 from cache import Cache
@@ -107,7 +106,6 @@ def _search_spotify(name: str, sp: spotipy.Spotify) -> Optional[str]:
     for c in candidates:
         candidate_name = c.get('name', '')
         candidate_id = c.get('id', '')
-        popularity = c.get('popularity', 0)
 
         if not candidate_id:
             continue
@@ -122,8 +120,6 @@ def _search_spotify(name: str, sp: spotipy.Spotify) -> Optional[str]:
             score = 50.0
         else:
             score = 0.0
-
-        score += popularity * 0.01   # popularity as tiebreaker
 
         if score > best_score:
             best_score = score

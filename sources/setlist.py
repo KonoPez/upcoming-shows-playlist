@@ -109,12 +109,10 @@ class SetlistClient:
                 continue   # skip shows with no setlist data entered yet
 
             shows_analyzed += 1
-            seen_in_show: set[str] = set()
             for name in songs:
                 key = _normalize_title(name)
-                if key and key not in seen_in_show:
+                if key:
                     counts[key] = counts.get(key, 0) + 1
-                    seen_in_show.add(key)
 
         if shows_analyzed == 0:
             return {}

@@ -240,13 +240,13 @@ class TestSearchSpotify:
 
     def test_exact_name_match_returned(self):
         sp = self._sp(items=[
-            {'id': 'bcnr123', 'name': 'Black Country, New Road', 'popularity': 60},
+            {'id': 'bcnr123', 'name': 'Black Country, New Road'},
         ])
         assert _search_spotify("Black Country, New Road", sp) == 'bcnr123'
 
     def test_normalized_name_match_returned(self):
         # "The National" normalizes the same as candidate "The National"
-        sp = self._sp(items=[{'id': 'nat1', 'name': 'The National', 'popularity': 70}])
+        sp = self._sp(items=[{'id': 'nat1', 'name': 'The National'}])
         assert _search_spotify("The National", sp) == 'nat1'
 
     def test_no_candidates_returns_none(self):
@@ -254,14 +254,14 @@ class TestSearchSpotify:
 
     def test_unrelated_candidates_return_none(self):
         sp = self._sp(items=[
-            {'id': 'z1', 'name': 'Completely Different Band', 'popularity': 80},
+            {'id': 'z1', 'name': 'Completely Different Band'},
         ])
         assert _search_spotify("Black Country, New Road", sp) is None
 
-    def test_exact_match_beats_more_popular_unrelated_artist(self):
+    def test_exact_match_beats_unrelated_artist(self):
         sp = self._sp(items=[
-            {'id': 'wrong',   'name': 'Something Else', 'popularity': 99},
-            {'id': 'correct', 'name': 'Mitski',         'popularity': 70},
+            {'id': 'wrong',   'name': 'Something Else'},
+            {'id': 'correct', 'name': 'Mitski'},
         ])
         assert _search_spotify("Mitski", sp) == 'correct'
 
@@ -297,7 +297,7 @@ class TestResolveArtist:
         cache = Cache(db_path=tmp_path / 'test.db')
         sp = MagicMock()
         sp.search.return_value = {'artists': {'items': [
-            {'id': 'mitski_id', 'name': 'Mitski', 'popularity': 70},
+            {'id': 'mitski_id', 'name': 'Mitski'},
         ]}}
 
         assert resolve_artist("Mitski", sp, cache) == 'mitski_id'

@@ -19,7 +19,7 @@ python main.py --dry-run    # preview playlist without writing to Spotify
 python -m pytest tests/ -v
 ```
 
-301 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~3 seconds.
+311 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~10 seconds.
 
 ## Project layout
 
@@ -29,17 +29,18 @@ config.py                   # Config dataclass, loaded from .env via python-dote
 cache.py                    # SQLite-backed KV cache (TTL) + play-history accumulation
 artist_resolver.py          # Calendar title parsing + Spotify artist ID resolution
 sources/
-  models.py                 # Concert dataclass
+  models.py                 # Concert and Track dataclasses
   apple_calendar.py         # iCloud CalDAV client
   google_calendar.py        # Google Calendar ICS client
   ticketmaster.py           # Ticketmaster Discovery API client (opener enrichment)
+  setlist.py                # Setlist.fm client — live play frequency per track
+  lastfm.py                 # Last.fm client — global track popularity scores
 spotify_client/
   auth.py                   # PKCE OAuth flow (no client secret)
   client.py                 # Playlist management, discography fetching, play history
 playlist_logic/
   weighting.py              # Exponential decay weights + Hamilton's slot allocation
-  scoring.py                # Track scoring: setlist frequency + recency + novelty
-  setlist.py                # Setlist.fm client — live play frequency per track
+  scoring.py                # Track scoring: Last.fm popularity + setlist frequency + recency + novelty
 tests/
   test_artist_resolver.py   # Title parsing, artist splitting, Spotify search, resolve_artist
   test_playlist_logic.py    # Weighting, slot allocation, track scoring, album interleaving
@@ -47,6 +48,7 @@ tests/
   test_spotify_client.py    # Variant recording filter (_is_variant_recording)
   test_ticketmaster.py      # Venue matching, Spotify ID extraction, opener enrichment
   test_setlist.py           # SetlistClient behaviour + setlist frequency in scoring
+  test_lastfm.py            # LastFmClient behaviour + log-normalisation
 conftest.py                 # Adds project root to sys.path for test imports
 .env                        # Local secrets — never commit
 .env.example                # Template with comments
@@ -65,6 +67,7 @@ conftest.py                 # Adds project root to sys.path for test imports
 | `PLAYLIST_NAME` | No | Defaults to `Concert Prep` |
 | `TICKETMASTER_API_KEY` | No | Enables opener-act lookup; free key at developer.ticketmaster.com |
 | `SETLIST_FM_API_KEY` | No | Boosts tracks artists regularly play live; free key at setlist.fm/settings/apps |
+| `LASTFM_API_KEY` | No | Scores tracks by global play count popularity (dominant signal when set); free key at last.fm/api/account/create |
 
 At least one calendar source must be configured.
 
@@ -80,9 +83,11 @@ At least one calendar source must be configured.
 
 **Variant recording filter**: `client._is_variant_recording(track_name, album_name)` skips live, acoustic, unplugged, remix, instrumental, and demo recordings before they enter the scoring pipeline. Album-level check (e.g. "Live at X", "Unplugged", "Remixes") skips the whole album. Track-level check matches both parenthetical suffixes (e.g. "Song (Live)") and dash suffixes (e.g. "Song - Acoustic", "Song - Demo") to avoid false positives on artistic titles like "Live Wire".
 
-**Track scoring** (see `playlist_logic/scoring.py`): Weights depend on whether setlist.fm data is available. *With setlist data*: 60% setlist frequency + 20% recency + 20% novelty. *Without setlist data*: 80% recency + 20% novelty. Setlist frequency (0.0–1.0) is how often the artist plays that track across their last 10 shows within the past year, sourced from setlist.fm. Using actual live-performance data as the dominant signal means old staples score fairly — a 5-year-old song played at every show beats a new track never played live. Recency is kept at 20% (not zero) even with setlist data because new tour material often enters setlists quickly. Without setlist data, recency becomes the dominant proxy. Novelty (inverse of familiarity) is always 20%. Familiarity combines Spotify top-tracks API signal and local play-count history, taking the max. A per-album cap (default 6 tracks) prevents a single album from dominating; selected tracks are then interleaved across albums (newest first, round-robin) to avoid consecutive same-album runs. Spotify's `popularity` field is deprecated and returns 0 for most artists — it is not used.
+**Track scoring** (see `playlist_logic/scoring.py`): Fixed base weights — Last.fm 45%, setlist 25%, recency 15%, novelty 15% — normalised by the sum of weights for signals that are actually available. This means relative signal importance is preserved regardless of which APIs are configured; no separate fallback weight sets are needed. Last.fm popularity (log-normalised global play counts from `artist.getTopTracks`) is the dominant signal when available. Setlist frequency (0.0–1.0) is how often the artist plays that track across their last 10 shows within the past year, sourced from setlist.fm. When setlist data is available but a track was never played live, it is penalised (the weight enters the denominator with a zero contribution), reflecting that live omission is meaningful signal. Recency is a linear decay over 18 months. Novelty is the inverse of familiarity. Familiarity combines Spotify top-tracks API signal and local play-count history, taking the max. A per-album cap (default 6 tracks) prevents a single album from dominating; selected tracks are then interleaved across albums (newest first, round-robin) to avoid consecutive same-album runs. Spotify's `popularity` field is deprecated and returns 0 for most artists — it is not used.
 
-**Setlist.fm integration** (`sources/setlist.py`): `SetlistClient.get_setlist_scores(artist_name)` fetches up to 10 recent shows (within the past year) via `GET /search/setlists?artistName=`. Each song is counted once per show (encores deduplicated). Frequency = appearances / shows_analysed. A 1-second sleep is inserted before each API call to respect rate limits. Results cached 7 days; empty results are also cached to avoid re-hitting the API for artists with no data. A `—` in `--dry-run` output means no setlist entry for that track (either the artist has no setlist API data, or the track never appeared in recent shows).
+**Setlist.fm integration** (`sources/setlist.py`): `SetlistClient.get_setlist_scores(artist_name)` fetches up to 10 recent shows (within the past year) via `GET /search/setlists?artistName=`. Each song appearance is counted — a song played twice in one show (e.g. as an encore) counts twice, since repeated performance is meaningful signal. Frequency = appearances / shows_analysed, and can exceed 1.0. A 1-second sleep is inserted before each API call to respect rate limits. Results cached 7 days; empty results are also cached to avoid re-hitting the API for artists with no data.
+
+**Last.fm integration** (`sources/lastfm.py`): `LastFmClient.get_popularity_scores(artist_name)` fetches up to 50 top tracks via `artist.getTopTracks`. Play counts are log-normalised so the most-played track scores 1.0 and others scale relative to it (log scale handles the power-law distribution of streaming counts). Results cached 7 days. In `--dry-run` output, `sl` shows setlist frequency and `lf` shows Last.fm popularity score; `—` means no data for that track.
 
 **Slot allocation** (see `playlist_logic/weighting.py`): Exponential decay with 21-day half-life. `allocate_slots` distributes a total duration budget (default 2 hours) proportionally across artists. Artists whose proportional share is below `min_tracks_per_artist × 3.5 min` are excluded. Hamilton's method distributes rounding so budgets sum to the target exactly. `select_tracks_for_artist` greedily fills each artist's time budget by score, stopping once the accumulated `duration_ms` reaches the artist's budget (rounding up to the last whole track).
 

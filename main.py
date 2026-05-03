@@ -20,15 +20,15 @@ from pathlib import Path
 from config import config, APP_DIR
 from cache import Cache
 from artist_resolver import resolve_artist
-from sources.models import Concert
+from sources.models import Artist, Concert, Track
 from sources.apple_calendar import AppleCalendarClient
 from sources.google_calendar import GoogleCalendarClient
 from spotify_client.client import SpotifyClient
 from spotify_client.auth import get_spotify_client
-from spotify_client.client import SpotifyClient
-from playlist_logic.weighting import compute_artist_weights, allocate_slots, ConcertSlot
+from playlist_logic.weighting import compute_artist_weights, allocate_slots
 from playlist_logic.scoring import select_tracks_for_artist
 from sources.setlist import SetlistClient
+from sources.lastfm import LastFmClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -126,6 +126,12 @@ def cmd_setup() -> None:
     print('  Get a free key at https://www.setlist.fm/settings/apps\n')
     setlist_key = prompt('Setlist.fm API key', config.setlist_fm_api_key, required=False)
 
+    # ── Last.fm ───────────────────────────────────────────────────────────────
+    print('\nLast.fm (optional)')
+    print('  Scores tracks by global play count popularity (dominant signal when set).')
+    print('  Get a free key at https://www.last.fm/api/account/create\n')
+    lastfm_key = prompt('Last.fm API key', config.lastfm_api_key, required=False)
+
     # ── Write .env ────────────────────────────────────────────────────────────
     env_lines = [
         '# Concert Playlist Configuration',
@@ -148,6 +154,9 @@ def cmd_setup() -> None:
         '# Setlist.fm (optional)',
         f'SETLIST_FM_API_KEY={setlist_key}',
         '',
+        '# Last.fm (optional)',
+        f'LASTFM_API_KEY={lastfm_key}',
+        '',
         '# Playlist',
         f'PLAYLIST_ID={playlist_id}',
         f'PLAYLIST_NAME={config.playlist_name or "Concert Prep"}',
@@ -163,7 +172,7 @@ def cmd_setup() -> None:
 
 # ── Concert fetching ─────────────────────────────────────────────────────────
 
-def fetch_all_concerts(window_days: int) -> tuple[list[Concert], date]:
+def fetch_all_concerts(window_days: int) -> "tuple[list[Concert], date]":
     today = date.today()
     end_date = today + timedelta(days=window_days)
     concerts: list[Concert] = []
@@ -259,8 +268,7 @@ def cmd_build(dry_run: bool = False) -> None:
 
     # 4. Resolve each artist name → Spotify artist ID; deduplicate concerts
     logger.info('Resolving artists to Spotify profiles…')
-    artist_names: dict[str, str] = {}
-    artist_concerts: dict[str, list[ConcertSlot]] = {}
+    artists: dict[str, Artist] = {}
     seen: set[tuple[str, date]] = set()
 
     for concert in concerts:
@@ -278,18 +286,18 @@ def cmd_build(dry_run: bool = False) -> None:
             continue
         seen.add(dedup)
 
-        days_until = (concert.event_date - today).days
-        artist_names[spotify_id] = concert.artist_name
-        artist_concerts.setdefault(spotify_id, []).append(ConcertSlot(days_until, concert.is_opener))
+        if spotify_id not in artists:
+            artists[spotify_id] = Artist(spotify_id=spotify_id, name=concert.artist_name)
+        artists[spotify_id].concerts.append(concert)
 
-    logger.info(f'Resolved {len(artist_concerts)} unique artists')
-    if not artist_concerts:
+    logger.info(f'Resolved {len(artists)} unique artists')
+    if not artists:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
 
     # 5. Compute weights and allocate duration budgets
     _ASSUMED_AVG_TRACK_MS = 210_000  # 3.5 min — used only to derive min exclusion threshold
-    weights = compute_artist_weights(artist_concerts)
+    weights = compute_artist_weights({a_id: a.concerts for a_id, a in artists.items()}, today)
     slots = allocate_slots(
         weights,
         target_duration_ms=config.playlist_target_duration_minutes * 60_000,
@@ -303,46 +311,44 @@ def cmd_build(dry_run: bool = False) -> None:
     # 7. Select tracks per artist
     setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
         if config.setlist_fm_api_key else None
-
-    selected_by_artist: dict[str, list[dict]] = {}
-    setlist_by_artist: dict[str, dict] = {}
+    lastfm_client = LastFmClient(config.lastfm_api_key, cache) \
+        if config.lastfm_api_key else None
 
     for artist_id, duration_budget_ms in sorted(slots.items(), key=lambda x: -x[1]):
-        name = artist_names.get(artist_id, artist_id)
-        logger.info(f'  {name}: fetching discography…')
+        artist = artists[artist_id]
+        logger.info(f'  {artist.name}: fetching discography…')
 
         tracks = sp.get_artist_tracks(artist_id, cache)
         if not tracks:
-            logger.warning(f'  {name}: no tracks found on Spotify')
+            logger.warning(f'  {artist.name}: no tracks found on Spotify')
             continue
 
         play_counts = cache.get_play_counts(artist_id)
-        setlist_scores = setlist_client.get_setlist_scores(name) if setlist_client else None
-        if setlist_scores:
-            setlist_by_artist[artist_id] = setlist_scores
-        chosen = select_tracks_for_artist(
+        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else None
+        artist.lastfm_scores  = lastfm_client.get_popularity_scores(artist.name) if lastfm_client else None
+        artist.selected_tracks = select_tracks_for_artist(
             tracks=tracks,
             duration_budget_ms=duration_budget_ms,
             spotify_familiarity=spotify_familiarity,
             play_counts=play_counts,
             today=today,
-            setlist_scores=setlist_scores,
+            setlist_scores=artist.setlist_scores,
+            lastfm_scores=artist.lastfm_scores,
         )
-        selected_by_artist[artist_id] = chosen
-        chosen_ms = sum(t.duration_ms for t in chosen)
+        chosen_ms = sum(t.duration_ms for t in artist.selected_tracks)
         logger.info(
-            f'  {name}: {len(chosen)} tracks (~{chosen_ms // 60_000}m of {duration_budget_ms // 60_000}m budget, '
+            f'  {artist.name}: {len(artist.selected_tracks)} tracks (~{chosen_ms // 60_000}m of {duration_budget_ms // 60_000}m budget, '
             f'{len(tracks)} in discography, '
-            f'concert in {min(s.days_until for s in artist_concerts[artist_id])}d)'
+            f'concert in {min(c.days_until(today) for c in artist.concerts)}d)'
         )
 
-    # 8. Flatten to ordered track list (nearest concert first)
+# 8. Flatten to ordered track list (nearest concert first)
     def nearest(artist_id: str) -> int:
-        return min(s.days_until for s in artist_concerts[artist_id])
+        return min(c.days_until(today) for c in artists[artist_id].concerts)
 
-    all_tracks: list[dict] = []
+    all_tracks: list[Track] = []
     for artist_id in sorted(slots, key=nearest):
-        all_tracks.extend(selected_by_artist.get(artist_id, []))
+        all_tracks.extend(artists[artist_id].selected_tracks)
 
     track_uris = [f'spotify:track:{t.id}' for t in all_tracks]
     total = len(track_uris)
@@ -351,20 +357,26 @@ def cmd_build(dry_run: bool = False) -> None:
 
     # 9. Dry run: print summary and exit
     if dry_run:
-        print(f'\n=== DRY RUN — {total} tracks (~{total_min}m) from {len(selected_by_artist)} artists ===\n')
+        artists_with_tracks = sum(1 for a in artists.values() if a.selected_tracks)
+        print(f'\n=== DRY RUN — {total} tracks (~{total_min}m) from {artists_with_tracks} artists ===\n')
         for artist_id in sorted(slots, key=nearest):
-            name = artist_names.get(artist_id, artist_id)
+            artist = artists[artist_id]
+            if not artist.selected_tracks:
+                continue
             days = nearest(artist_id)
-            chosen = selected_by_artist.get(artist_id, [])
-            chosen_min = sum(t.duration_ms for t in chosen) // 60_000
-            print(f'{name}  ({len(chosen)} tracks, ~{chosen_min}m, concert in {days}d):')
-            scores = setlist_by_artist.get(artist_id, {})
-            for t in chosen:
+            chosen_min = sum(t.duration_ms for t in artist.selected_tracks) // 60_000
+            print(f'{artist.name}  ({len(artist.selected_tracks)} tracks, ~{chosen_min}m, concert in {days}d):')
+            sl_scores = artist.setlist_scores or {}
+            lf_scores = artist.lastfm_scores or {}
+            for t in artist.selected_tracks:
                 release = (t.release_date or '?')[:4]
                 dur = t.duration_ms // 1000
-                freq = scores.get(t.name.lower().strip())
-                freq_str = f'{freq:.0%}' if freq is not None else '  —'
-                print(f'  [{freq_str:>4}] {t.name}  ({t.album_name}, {release}) [{dur//60}:{dur%60:02d}]')
+                name_key = t.name.lower().strip()
+                freq = sl_scores.get(name_key)
+                pop  = lf_scores.get(name_key)
+                sl_str = f'{freq:.0%}' if freq is not None else '—'
+                lf_str = f'{pop:.0%}'  if pop  is not None else '—'
+                print(f'  [sl:{sl_str:>4} lf:{lf_str:>4}] {t.name}  ({t.album_name}, {release}) [{dur//60}:{dur%60:02d}]')
             print()
         return
 
@@ -372,7 +384,7 @@ def cmd_build(dry_run: bool = False) -> None:
     playlist_id = sp.get_or_create_playlist(config.playlist_name, config.playlist_id)
     sp.update_playlist_tracks(playlist_id, track_uris)
 
-    print(f'\nPlaylist updated: {total} tracks (~{total_min}m) from {len(selected_by_artist)} artists')
+    print(f'\nPlaylist updated: {total} tracks (~{total_min}m) from {sum(1 for a in artists.values() if a.selected_tracks)} artists')
     print(f'Open: https://open.spotify.com/playlist/{playlist_id}')
 
 

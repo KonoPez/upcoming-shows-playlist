@@ -7,16 +7,30 @@ from datetime import date, timedelta
 
 import pytest
 
-from sources.models import Track
+from sources.models import Concert, Track
 from playlist_logic.weighting import (
     HALF_LIFE_DAYS,
     HEADLINER_BONUS,
-    ConcertSlot,
     allocate_slots,
     compute_artist_weights,
     concert_weight,
 )
+
+_TODAY = date(2024, 1, 1)
+
+
+def _concert(days_until: int, is_opener: bool = False) -> Concert:
+    """Build a minimal Concert object a fixed number of days from _TODAY."""
+    return Concert(
+        event_name='Test Show',
+        artist_name='Artist',
+        event_date=_TODAY + timedelta(days=days_until),
+        venue='Venue',
+        source='test',
+        is_opener=is_opener,
+    )
 from playlist_logic.scoring import (
+    LASTFM_W,
     RECENCY_WINDOW_DAYS,
     _familiarity,
     _interleave_albums,
@@ -54,43 +68,47 @@ class TestConcertWeight:
 
 class TestComputeArtistWeights:
     def test_single_headliner_concert(self):
-        weights = compute_artist_weights({'a1': [ConcertSlot(10, False)]})
+        weights = compute_artist_weights({'a1': [_concert(10)]}, _TODAY)
         assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
     def test_single_opener_concert(self):
-        weights = compute_artist_weights({'a1': [ConcertSlot(10, True)]})
+        weights = compute_artist_weights({'a1': [_concert(10, is_opener=True)]}, _TODAY)
         assert abs(weights['a1'] - concert_weight(10)) < 1e-9
 
     def test_multiple_concerts_for_same_artist_are_summed(self):
-        weights = compute_artist_weights({'a1': [ConcertSlot(10, False), ConcertSlot(20, False)]})
+        weights = compute_artist_weights({'a1': [_concert(10), _concert(20)]}, _TODAY)
         expected = (concert_weight(10) + concert_weight(20)) * HEADLINER_BONUS
         assert abs(weights['a1'] - expected) < 1e-9
 
     def test_past_concerts_excluded(self):
-        weights = compute_artist_weights({'a1': [ConcertSlot(0, False), ConcertSlot(-1, False), ConcertSlot(-30, False)]})
+        weights = compute_artist_weights({'a1': [_concert(0), _concert(-1), _concert(-30)]}, _TODAY)
         assert 'a1' not in weights
 
     def test_mixed_past_and_future_only_sums_future(self):
-        weights = compute_artist_weights({'a1': [ConcertSlot(-5, False), ConcertSlot(10, False)]})
+        weights = compute_artist_weights({'a1': [_concert(-5), _concert(10)]}, _TODAY)
         assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
     def test_multiple_artists(self):
-        weights = compute_artist_weights({'a1': [ConcertSlot(7, False)], 'a2': [ConcertSlot(30, False)]})
+        weights = compute_artist_weights({'a1': [_concert(7)], 'a2': [_concert(30)]}, _TODAY)
         assert 'a1' in weights and 'a2' in weights
         assert weights['a1'] > weights['a2']   # closer concert → heavier weight
 
     def test_empty_input(self):
-        assert compute_artist_weights({}) == {}
+        assert compute_artist_weights({}, _TODAY) == {}
 
     def test_headliner_outweighs_opener_same_day(self):
         # Same concert day — headliner should have a larger weight than opener.
-        weights = compute_artist_weights({'h': [ConcertSlot(14, False)], 'o': [ConcertSlot(14, True)]})
+        weights = compute_artist_weights(
+            {'h': [_concert(14)], 'o': [_concert(14, is_opener=True)]}, _TODAY
+        )
         assert weights['h'] > weights['o']
         assert abs(weights['h'] / weights['o'] - HEADLINER_BONUS) < 1e-9
 
     def test_mixed_roles_bonus_applied_per_concert(self):
         # Artist headlining in 11 days, opening in 33 days.
-        weights = compute_artist_weights({'a': [ConcertSlot(11, False), ConcertSlot(33, True)]})
+        weights = compute_artist_weights(
+            {'a': [_concert(11), _concert(33, is_opener=True)]}, _TODAY
+        )
         expected = concert_weight(11) * HEADLINER_BONUS + concert_weight(33)
         assert abs(weights['a'] - expected) < 1e-9
 
@@ -264,6 +282,23 @@ class TestScoreTrack:
         unfamiliar = score_track(self._track(), {}, {}, self.TODAY)
         assert unfamiliar > fully_familiar
 
+    def test_higher_lastfm_popularity_raises_score(self):
+        lo = score_track(self._track(), {}, {}, self.TODAY, lastfm_scores={'test track': 0.1})
+        hi = score_track(self._track(), {}, {}, self.TODAY, lastfm_scores={'test track': 0.9})
+        assert hi > lo
+
+    def test_lastfm_and_setlist_both_score_higher_than_either_alone(self):
+        # Old track, unfamiliar: recency=0, novelty=1.0. Both signals at max.
+        setlist_only = score_track(self._track(), {}, {}, self.TODAY,
+                                   setlist_scores={'test track': 1.0})
+        lastfm_only  = score_track(self._track(), {}, {}, self.TODAY,
+                                   lastfm_scores={'test track': 1.0})
+        both = score_track(self._track(), {}, {}, self.TODAY,
+                           setlist_scores={'test track': 1.0},
+                           lastfm_scores={'test track': 1.0})
+        assert both > setlist_only
+        assert both > lastfm_only
+
 
 # ── select_tracks_for_artist ──────────────────────────────────────────────────
 
@@ -310,6 +345,13 @@ class TestSelectTracksForArtist:
         familiarity = {f't{i}': 1.0 for i in range(1, 5)}   # t1–t4 familiar
         selected = select_tracks_for_artist(tracks, 1 * _TRACK_MS, familiarity, {}, self.TODAY)
         assert selected[0].id == 't5'
+
+    def test_lastfm_popular_track_ranked_first(self):
+        tracks = self._tracks(2)
+        lastfm = {'track 2': 1.0}
+        selected = select_tracks_for_artist(tracks, 1 * _TRACK_MS, {}, {}, self.TODAY,
+                                            lastfm_scores=lastfm)
+        assert selected[0].id == 't2'
 
     def test_result_ordered_best_first(self):
         # Tracks with higher setlist frequency should be selected first

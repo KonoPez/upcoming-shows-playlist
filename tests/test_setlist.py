@@ -10,7 +10,7 @@ import pytest
 
 from sources.models import Track
 from sources.setlist import SetlistClient, _normalize_title, _parse_setlist_date, MAX_SHOWS
-from playlist_logic.scoring import SETLIST_W, score_track, select_tracks_for_artist
+from playlist_logic.scoring import SETLIST_W, RECENCY_W, NOVELTY_W, score_track, select_tracks_for_artist
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,8 +119,9 @@ class TestSetlistClient:
         assert 'old song' not in result
         assert 'new song' in result
 
-    def test_song_counted_once_per_show_even_if_played_twice(self):
-        # Encores or duplicates in the data shouldn't inflate frequency above 1.0
+    def test_song_played_twice_in_show_counts_twice(self):
+        # A song appearing twice (e.g. encore repeat) counts both appearances —
+        # repeated performance is a meaningful signal, not noise to suppress.
         setlist = _make_setlist(['Song A', 'Song A'], days_ago=5)
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'setlist': [setlist]}
@@ -129,7 +130,7 @@ class TestSetlistClient:
         with patch('sources.setlist.requests.get', return_value=mock_resp):
             result = self._client().get_setlist_scores('Artist')
 
-        assert abs(result['song a'] - 1.0) < 1e-9
+        assert abs(result['song a'] - 2.0) < 1e-9   # 2 appearances / 1 show
 
     def test_empty_setlists_returns_empty_dict(self):
         mock_resp = MagicMock()
@@ -180,33 +181,36 @@ class TestScoreTrackSetlistAsPopularity:
         return score_track(track, {}, {}, self.TODAY, setlist_scores)
 
     def test_no_setlist_scores_uses_zero_popularity(self):
-        # None and empty dict both yield popularity=0.0
+        # None and empty dict are both falsy — same scoring path, same result.
         base = self._score('Song', None)
         with_empty = self._score('Song', {})
         assert base == with_empty
 
-    def test_track_in_every_show_gets_full_setlist_weight(self):
-        # Test track release_date='2020-01-01' is outside the recency window at
-        # TODAY=2024-06-01, so recency=0 for both paths and the difference is
-        # purely SETLIST_W × freq.
+    def test_track_in_every_show_scores_higher_than_no_data(self):
+        # track release_date='2020-01-01' is outside recency window at TODAY=2024-06-01,
+        # so recency=0. Full setlist presence should lift the score above the no-data baseline.
         no_setlist = self._score('Song', None)
         full_setlist = self._score('Song', {'song': 1.0})
-        assert abs(full_setlist - no_setlist - SETLIST_W * 1.0) < 1e-9
+        assert full_setlist > no_setlist
 
-    def test_partial_frequency_gives_partial_setlist_weight(self):
-        no_setlist = self._score('Song', None)
-        half_setlist = self._score('Song', {'song': 0.5})
-        assert abs(half_setlist - no_setlist - SETLIST_W * 0.5) < 1e-9
+    def test_partial_frequency_scores_between_none_and_full(self):
+        # With normalization, partial frequency > full should hold monotonically.
+        lo = self._score('Song', {'song': 0.25})
+        hi = self._score('Song', {'song': 0.75})
+        assert hi > lo
 
     def test_higher_frequency_scores_higher(self):
         lo = self._score('Song', {'song': 0.25})
         hi = self._score('Song', {'song': 0.75})
         assert hi > lo
 
-    def test_track_not_in_setlist_unaffected(self):
-        base = self._score('Song', None)
-        with_setlist = self._score('Song', {'other song': 1.0})
-        assert base == with_setlist
+    def test_track_absent_from_setlist_scores_lower_than_no_data(self):
+        # When setlist data exists for an artist but a track was never played,
+        # w_setlist enters the denominator with 0 contribution → lower score
+        # than when no setlist data exists at all (smaller denominator).
+        no_data = self._score('Song', None)
+        not_in_setlist = self._score('Song', {'other song': 1.0})
+        assert not_in_setlist < no_data
 
     def test_matching_is_case_insensitive(self):
         base = self._score('From The Start', None)

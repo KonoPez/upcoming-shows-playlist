@@ -1,4 +1,4 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import date
 from typing import Optional
 
@@ -38,3 +38,16 @@ class Concert:
     source: str
     tm_spotify_id: Optional[str] = None  # Spotify artist ID if known from source metadata
     is_opener: bool = False              # True for supporting acts found via Ticketmaster
+
+    def days_until(self, today: date) -> int:
+        return (self.event_date - today).days
+
+
+@dataclass
+class Artist:
+    spotify_id: str
+    name: str
+    concerts: list[Concert] = field(default_factory=list)
+    setlist_scores: Optional[dict[str, float]] = None
+    lastfm_scores: Optional[dict[str, float]] = None
+    selected_tracks: list[Track] = field(default_factory=list)

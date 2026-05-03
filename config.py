@@ -45,6 +45,11 @@ class Config:
         default_factory=lambda: _env_str('SETLIST_FM_API_KEY')
     )
 
+    # Last.fm (optional — scores tracks by global play count popularity)
+    lastfm_api_key: str = field(
+        default_factory=lambda: _env_str('LASTFM_API_KEY')
+    )
+
     # Playlist tuning
     concert_window_days: int = 90
     playlist_target_duration_minutes: int = 120

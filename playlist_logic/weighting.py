@@ -18,14 +18,11 @@ without exceeding the target size.
 
 import math
 import logging
-from typing import NamedTuple
+from datetime import date
+
+from sources.models import Concert
 
 logger = logging.getLogger(__name__)
-
-class ConcertSlot(NamedTuple):
-    days_until: int
-    is_opener: bool
-
 
 HALF_LIFE_DAYS = 21.0
 _LAMBDA = math.log(2) / HALF_LIFE_DAYS
@@ -42,11 +39,13 @@ def concert_weight(days_until: int) -> float:
     return math.exp(-_LAMBDA * days_until)
 
 
-def compute_artist_weights(artist_concerts: dict[str, list[ConcertSlot]]) -> dict[str, float]:
+def compute_artist_weights(
+    artist_concerts: dict[str, list[Concert]], today: date
+) -> dict[str, float]:
     """
     Compute a raw weight for each artist.
 
-    artist_concerts: {spotify_artist_id: [(days_until, is_opener), ...]}
+    artist_concerts: {spotify_artist_id: [Concert, ...]}
       Each entry is one concert appearance. An artist with two concerts —
       one in 10 days and one in 40 days — gets the *sum* of both weights.
       Headliner slots (is_opener=False) receive a HEADLINER_BONUS multiplier
@@ -59,8 +58,8 @@ def compute_artist_weights(artist_concerts: dict[str, list[ConcertSlot]]) -> dic
     weights = {}
     for artist_id, concerts in artist_concerts.items():
         total = sum(
-            concert_weight(s.days_until) * (1 if s.is_opener else HEADLINER_BONUS)
-            for s in concerts
+            concert_weight(c.days_until(today)) * (1 if c.is_opener else HEADLINER_BONUS)
+            for c in concerts
         )
         if total > 0.0:
             weights[artist_id] = total
