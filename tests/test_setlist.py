@@ -193,12 +193,6 @@ class TestScoreTrackSetlistAsPopularity:
         full_setlist = self._score('Song', {'song': 1.0})
         assert full_setlist > no_setlist
 
-    def test_partial_frequency_scores_between_none_and_full(self):
-        # With normalization, partial frequency > full should hold monotonically.
-        lo = self._score('Song', {'song': 0.25})
-        hi = self._score('Song', {'song': 0.75})
-        assert hi > lo
-
     def test_higher_frequency_scores_higher(self):
         lo = self._score('Song', {'song': 0.25})
         hi = self._score('Song', {'song': 0.75})

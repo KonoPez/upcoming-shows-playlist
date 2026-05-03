@@ -296,7 +296,7 @@ def cmd_build(dry_run: bool = False) -> None:
         return
 
     # 5. Compute weights and allocate duration budgets
-    _ASSUMED_AVG_TRACK_MS = 210_000  # 3.5 min — used only to derive min exclusion threshold
+    _ASSUMED_AVG_TRACK_MS = 210_000  # 3.5 min average track length
     weights = compute_artist_weights({a_id: a.concerts for a_id, a in artists.items()}, today)
     slots = allocate_slots(
         weights,
@@ -342,7 +342,7 @@ def cmd_build(dry_run: bool = False) -> None:
             f'concert in {min(c.days_until(today) for c in artist.concerts)}d)'
         )
 
-# 8. Flatten to ordered track list (nearest concert first)
+    # 8. Flatten to ordered track list (nearest concert first)
     def nearest(artist_id: str) -> int:
         return min(c.days_until(today) for c in artists[artist_id].concerts)
 

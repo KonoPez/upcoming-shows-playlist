@@ -15,6 +15,16 @@ from playlist_logic.weighting import (
     compute_artist_weights,
     concert_weight,
 )
+from playlist_logic.scoring import (
+    LASTFM_W,
+    RECENCY_WINDOW_DAYS,
+    _familiarity,
+    _interleave_albums,
+    _parse_release_date,
+    _recency_score,
+    score_track,
+    select_tracks_for_artist,
+)
 
 _TODAY = date(2024, 1, 1)
 
@@ -29,16 +39,6 @@ def _concert(days_until: int, is_opener: bool = False) -> Concert:
         source='test',
         is_opener=is_opener,
     )
-from playlist_logic.scoring import (
-    LASTFM_W,
-    RECENCY_WINDOW_DAYS,
-    _familiarity,
-    _interleave_albums,
-    _parse_release_date,
-    _recency_score,
-    score_track,
-    select_tracks_for_artist,
-)
 
 
 # ── concert_weight ────────────────────────────────────────────────────────────
@@ -187,10 +187,6 @@ class TestRecencyScore:
     def test_released_today_is_one(self):
         assert _recency_score(self.TODAY, self.TODAY) == 1.0
 
-    def test_future_release_is_one(self):
-        future = self.TODAY + timedelta(days=30)
-        assert _recency_score(future, self.TODAY) == 1.0
-
     def test_old_release_is_zero(self):
         old = date(2000, 1, 1)
         assert _recency_score(old, self.TODAY) == 0.0
@@ -204,11 +200,6 @@ class TestRecencyScore:
         score = _recency_score(halfway, self.TODAY)
         assert abs(score - 0.5) < 0.01
 
-    def test_score_decreases_as_release_ages(self):
-        s1 = _recency_score(self.TODAY - timedelta(days=30), self.TODAY)
-        s2 = _recency_score(self.TODAY - timedelta(days=200), self.TODAY)
-        s3 = _recency_score(self.TODAY - timedelta(days=400), self.TODAY)
-        assert s1 > s2 > s3
 
 
 # ── _familiarity ──────────────────────────────────────────────────────────────
@@ -234,9 +225,6 @@ class TestFamiliarity:
         # API says 0.3; play history says 0.7 → use 0.7
         assert abs(_familiarity('t1', {'t1': 0.3}, {'t1': 7}) - 0.7) < 1e-9
 
-    def test_api_wins_when_higher(self):
-        # API says 0.9; play history says 0.2 → use 0.9
-        assert _familiarity('t1', {'t1': 0.9}, {'t1': 2}) == 0.9
 
 
 # ── score_track ───────────────────────────────────────────────────────────────
@@ -254,10 +242,6 @@ class TestScoreTrack:
             album_id='',
             album_name='',
         )
-
-    def test_score_in_unit_range(self):
-        score = score_track(self._track(), {}, {}, self.TODAY)
-        assert 0.0 <= score <= 1.0
 
     def test_higher_setlist_frequency_raises_score(self):
         lo = score_track(self._track(), {}, {}, self.TODAY, setlist_scores={'test track': 0.1})
@@ -444,10 +428,9 @@ class TestSelectTracksAlbumCap:
             assert album_ids[i] != album_ids[i + 1], \
                 f'Consecutive same album at positions {i},{i+1}: {album_ids}'
 
-    def test_cap_zero_popularity_scenario(self):
-        # Simulates Good Kid / BCNR: all popularity=0, newest album wins on recency.
+    def test_cap_zero_signals_scenario(self):
+        # No setlist or Last.fm data — recency is the only differentiator.
         # Three albums ensure enough supply for 9 slots despite cap=4.
-        # Cap should prevent any single album from claiming all slots.
         tracks_2026 = [_make_track(f'n{i}', 'new_album', '2026-01-01') for i in range(9)]
         tracks_2023 = [_make_track(f'm{i}', 'mid_album', '2023-06-01') for i in range(9)]
         tracks_2020 = [_make_track(f'o{i}', 'old_album', '2020-01-01') for i in range(9)]

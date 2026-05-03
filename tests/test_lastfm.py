@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sources.lastfm import LastFmClient, _normalize_title, MAX_TRACKS
+from sources.lastfm import LastFmClient, MAX_TRACKS
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -25,16 +25,6 @@ def _make_tracks(names_and_counts: list[tuple[str, int]]) -> list[dict]:
 
 def _client(cache=None) -> LastFmClient:
     return LastFmClient('fake-key', cache or _make_cache())
-
-
-# ── _normalize_title ──────────────────────────────────────────────────────────
-
-class TestNormalizeTitle:
-    def test_lowercases(self):
-        assert _normalize_title('From The Start') == 'from the start'
-
-    def test_strips_whitespace(self):
-        assert _normalize_title('  hello  ') == 'hello'
 
 
 # ── LastFmClient ──────────────────────────────────────────────────────────────

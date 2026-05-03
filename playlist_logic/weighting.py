@@ -72,17 +72,9 @@ def allocate_slots(
     min_duration_ms: int = 0,
 ) -> dict[str, int]:
     """
-    Distribute `target_duration_ms` of playlist time across artists proportional
-    to their weights.
-
-    Artists whose exact proportional share is below `min_duration_ms` are
-    excluded — a far-away concert doesn't justify playlist space when near-term
-    concerts already fill the target.
-
-    Uses Hamilton's method (largest remainder) so the budgets sum to
-    target_duration_ms exactly.
-
-    Returns: {spotify_artist_id: duration_budget_ms}  (only artists with budget > 0)
+    Distribute `target_duration_ms` across artists proportional to their weights.
+    Artists whose proportional share is below `min_duration_ms` are excluded.
+    Returns: {spotify_artist_id: duration_budget_ms}
     """
     if not weights:
         return {}
