@@ -35,7 +35,7 @@ from playlist_logic.discovery_weighting import (
 )
 from sources.setlist import SetlistClient
 from sources.lastfm import LastFmClient
-from sources.ticketmaster import TicketmasterClient
+from sources.ticketmaster import TicketmasterClient, enrich_with_openers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,7 +236,6 @@ def cmd_status() -> None:
     concerts, today = fetch_all_concerts(config.concert_window_days)
 
     if config.ticketmaster_api_key:
-        from sources.ticketmaster import TicketmasterClient, enrich_with_openers
         cache = Cache()
         tm = TicketmasterClient(config.ticketmaster_api_key, cache)
         concerts = enrich_with_openers(concerts, tm)
@@ -278,7 +277,6 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     # 1b. Enrich single-artist events with Ticketmaster opener data
     if config.ticketmaster_api_key:
-        from sources.ticketmaster import TicketmasterClient, enrich_with_openers
         logger.info('Checking Ticketmaster for opening acts…')
         tm = TicketmasterClient(config.ticketmaster_api_key, cache)
         concerts = enrich_with_openers(concerts, tm)
@@ -508,6 +506,25 @@ def resolve_discovery_location(cache: 'Cache') -> 'tuple[str | None, str | None]
 
 # ── Discovery playlist build ──────────────────────────────────────────────────
 
+def resolve_calendar_ids(
+    calendar_artist_names: list,
+    sp_raw: object,
+    cache: object,
+) -> set:
+    """
+    Resolve a list of artist names (from calendar events) to Spotify artist IDs.
+
+    Names that cannot be resolved are silently skipped.  The returned set is
+    used to filter discovery candidates so already-booked artists are excluded.
+    """
+    ids: set = set()
+    for name in calendar_artist_names:
+        cid = resolve_artist(name, sp_raw, cache)
+        if cid:
+            ids.add(cid)
+    return ids
+
+
 def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     config.validate_discovery()
 
@@ -535,7 +552,24 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     logger.info(f'Found {len(concerts)} artist slots across local events')
 
-    # 3. Authenticate with Spotify
+    # 3. Collect calendar artist names to exclude (already have tickets)
+    #     fetch_all_concerts returns empty if no calendar is configured.
+    #     enrich_with_openers adds opening acts so they're excluded too —
+    #     if you already have a ticket, you'll see the whole bill.
+    logger.info('Fetching calendar events to identify already-booked artists…')
+    cal_concerts, _ = fetch_all_concerts(config.discovery_window_days)
+    if cal_concerts:
+        cal_concerts = enrich_with_openers(cal_concerts, tm)
+    seen_cal: set[str] = set()
+    calendar_artist_names: list[str] = []
+    for c in cal_concerts:
+        if c.artist_name not in seen_cal:
+            calendar_artist_names.append(c.artist_name)
+            seen_cal.add(c.artist_name)
+    if calendar_artist_names:
+        logger.info(f'Found {len(calendar_artist_names)} calendar artist(s) to exclude')
+
+    # 5. Authenticate with Spotify
     sp_raw = get_spotify_client(
         client_id=config.spotify_client_id,
         redirect_uri=config.spotify_redirect_uri,
@@ -544,13 +578,13 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     )
     sp = SpotifyClient(sp_raw)
 
-    # 4. Accumulate play history so familiarity scores improve over time
+    # 6. Accumulate play history so familiarity scores improve over time
     logger.info('Syncing play history…')
     plays = sp.get_recently_played_with_artists(cache)
     new_plays = cache.record_plays(plays)
     logger.info(f'Recorded {new_plays} new play events')
 
-    # 5. Resolve each artist name → Spotify artist ID; deduplicate
+    # 7. Resolve each artist name → Spotify artist ID; deduplicate
     logger.info('Resolving artists to Spotify profiles…')
     artists: dict[str, Artist] = {}
     seen: set[tuple[str, date]] = set()
@@ -579,15 +613,27 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
 
+    # 8. Remove artists the user already has tickets to (calendar sources)
+    if calendar_artist_names:
+        calendar_ids = resolve_calendar_ids(calendar_artist_names, sp_raw, cache)
+        before = len(artists)
+        artists = {aid: a for aid, a in artists.items() if aid not in calendar_ids}
+        removed = before - len(artists)
+        if removed:
+            logger.info(f'Excluded {removed} already-booked artist(s) from discovery candidates')
+        if not artists:
+            print('All nearby artists are already in your concert calendar — nothing new to discover!')
+            return
+
     candidate_ids = list(artists.keys())
 
-    # 6. Compute artist familiarity
+    # 9. Compute artist familiarity
     logger.info('Computing artist familiarity…')
     top_scores    = sp.get_artist_top_scores(cache)
     play_counts   = cache.get_artist_play_counts()
     familiarity   = compute_artist_familiarity_scores(candidate_ids, top_scores, play_counts)
 
-    # 7. Fetch Last.fm global popularity (optional)
+    # 10. Fetch Last.fm global popularity (optional)
     raw_listeners: dict[str, int] = {}
     if config.lastfm_api_key:
         lastfm_client = LastFmClient(config.lastfm_api_key, cache)
@@ -597,7 +643,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             if count is not None:
                 raw_listeners[artist_id] = count
 
-    # 8. Score + select artists (floor + cap)
+    # 11. Score + select artists (floor + cap)
     selected_ids, enjoyment_scores = select_discovery_artists(
         candidate_ids=candidate_ids,
         familiarity_scores=familiarity,
@@ -612,7 +658,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     artists = {aid: artists[aid] for aid in selected_ids}
 
-    # 9. Allocate duration budgets weighted by enjoyment × proximity
+    # 12. Allocate duration budgets weighted by enjoyment × proximity
     weights = compute_discovery_weights(artists, enjoyment_scores, today)
     slots   = allocate_slots(
         weights,
@@ -620,11 +666,11 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         min_duration_ms=0,   # every selected artist gets a slot; select_tracks rounds up to 1 track
     )
 
-    # 10. Get track-level familiarity for scoring
+    # 13. Get track-level familiarity for scoring
     logger.info('Fetching Spotify listening history…')
     spotify_familiarity = sp.get_user_familiarity(cache)
 
-    # 11. Select tracks per artist (identical pipeline to prep playlist)
+    # 14. Select tracks per artist (identical pipeline to prep playlist)
     setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
         if config.setlist_fm_api_key else None
     lastfm_track_client = LastFmClient(config.lastfm_api_key, cache) \
@@ -659,7 +705,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             f'concert in {nearest}d)'
         )
 
-    # 12. Flatten to ordered track list (highest-enjoyment artist first)
+    # 15. Flatten to ordered track list (highest-enjoyment artist first)
     all_tracks: list[Track] = []
     for artist_id in sorted(slots, key=lambda aid: -enjoyment_scores.get(aid, 0.0)):
         all_tracks.extend(artists[artist_id].selected_tracks)
@@ -668,7 +714,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     total      = len(track_uris)
     total_min  = sum(t.duration_ms for t in all_tracks) // 60_000
 
-    # 13. Dry run: print summary and exit
+    # 16. Dry run: print summary and exit
     if dry_run:
         artists_with_tracks = sum(1 for a in artists.values() if a.selected_tracks)
         print(f'\n=== DISCOVERY DRY RUN — {total} tracks (~{total_min}m) from {artists_with_tracks} artists ===\n')
@@ -695,7 +741,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             print()
         return
 
-    # 14. Update Spotify discovery playlist
+    # 17. Update Spotify discovery playlist
     playlist_id = sp.get_or_create_playlist(
         config.discovery_playlist_name,
         config.discovery_playlist_id,

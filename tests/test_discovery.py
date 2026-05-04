@@ -592,3 +592,59 @@ class TestGetArtistListeners:
             client.get_artist_listeners('Artist')
         stored_value = cache.set.call_args[0][1]
         assert stored_value == -1   # sentinel stored, not None
+
+
+# ── resolve_calendar_ids ──────────────────────────────────────────────────────
+
+class TestResolveCalendarIds:
+    """Tests for main.resolve_calendar_ids."""
+
+    def _run(self, names: list, resolve_map: dict) -> set:
+        """Call resolve_calendar_ids with a stubbed resolve_artist."""
+        from main import resolve_calendar_ids
+        cache = MagicMock()
+
+        def fake_resolve(name, sp_raw, cache, **kwargs):
+            return resolve_map.get(name)
+
+        with patch('main.resolve_artist', side_effect=fake_resolve):
+            return resolve_calendar_ids(names, sp_raw=object(), cache=cache)
+
+    def test_empty_names_returns_empty_set(self):
+        assert self._run([], {}) == set()
+
+    def test_resolves_names_to_ids(self):
+        result = self._run(
+            ['Artist A', 'Artist B'],
+            {'Artist A': 'id_a', 'Artist B': 'id_b'},
+        )
+        assert result == {'id_a', 'id_b'}
+
+    def test_unresolvable_name_skipped(self):
+        """Names that resolve to None don't contribute an ID."""
+        result = self._run(
+            ['Known Artist', 'Unknown Act'],
+            {'Known Artist': 'id_known', 'Unknown Act': None},
+        )
+        assert result == {'id_known'}
+        assert None not in result
+
+    def test_all_unresolvable_returns_empty(self):
+        result = self._run(['A', 'B'], {'A': None, 'B': None})
+        assert result == set()
+
+    def test_duplicate_names_produce_one_id(self):
+        """The same name appearing twice maps to the same ID once."""
+        result = self._run(
+            ['Same Artist', 'Same Artist'],
+            {'Same Artist': 'id_same'},
+        )
+        assert result == {'id_same'}
+
+    def test_resolve_artist_called_for_each_name(self):
+        """resolve_artist is invoked once per name in the input list."""
+        from main import resolve_calendar_ids
+        cache = MagicMock()
+        with patch('main.resolve_artist', return_value=None) as mock_resolve:
+            resolve_calendar_ids(['A', 'B', 'C'], sp_raw=object(), cache=cache)
+        assert mock_resolve.call_count == 3
