@@ -50,6 +50,18 @@ class Config:
         default_factory=lambda: _env_str('LASTFM_API_KEY')
     )
 
+    # Discovery playlist
+    discovery_playlist_id: str = field(default_factory=lambda: _env_str('DISCOVERY_PLAYLIST_ID'))
+    discovery_playlist_name: str = field(
+        default_factory=lambda: _env_str('DISCOVERY_PLAYLIST_NAME', 'Concert Discoveries')
+    )
+    discovery_location: str = field(default_factory=lambda: _env_str('DISCOVERY_LOCATION'))
+    discovery_lat_lng: str = field(default_factory=lambda: _env_str('DISCOVERY_LAT_LNG'))
+    discovery_radius_miles: int = 50
+    discovery_window_days: int = 60
+    discovery_max_artists: int = 10
+    discovery_min_score: float = 0.10
+
     # Playlist tuning
     concert_window_days: int = 90
     playlist_target_duration_minutes: int = 120
@@ -58,6 +70,20 @@ class Config:
     @property
     def spotify_token_path(self) -> str:
         return str(APP_DIR / 'spotify_token.json')
+
+    def validate_discovery(self) -> None:
+        """Raise ValueError if required discovery config is missing."""
+        missing = []
+        if not self.spotify_client_id:
+            missing.append('SPOTIFY_CLIENT_ID')
+        if not self.ticketmaster_api_key:
+            missing.append('TICKETMASTER_API_KEY (required for concert discovery)')
+        if missing:
+            raise ValueError(
+                'Missing required configuration:\n'
+                + '\n'.join(f'  {m}' for m in missing)
+                + '\n\nSet these in .env or run: python main.py --setup'
+            )
 
     def validate_required(self) -> None:
         missing = []

@@ -12,6 +12,7 @@ Commands:
 """
 
 import argparse
+import datetime
 import logging
 import sys
 from datetime import date, timedelta
@@ -27,8 +28,14 @@ from spotify_client.client import SpotifyClient
 from spotify_client.auth import get_spotify_client
 from playlist_logic.weighting import compute_artist_weights, allocate_slots
 from playlist_logic.scoring import select_tracks_for_artist
+from playlist_logic.discovery_weighting import (
+    compute_artist_familiarity_scores,
+    select_discovery_artists,
+    compute_discovery_weights,
+)
 from sources.setlist import SetlistClient
 from sources.lastfm import LastFmClient
+from sources.ticketmaster import TicketmasterClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -170,6 +177,31 @@ def cmd_setup() -> None:
     print(f'  python {Path.cwd()}/setup_cron.py')
 
 
+# ── Cache status ─────────────────────────────────────────────────────────────
+
+def cmd_cache_status() -> None:
+    s = Cache().get_summary()
+
+    print('\n=== Cache Summary ===\n')
+
+    last = s['last_run']
+    if last:
+        run_at = datetime.datetime.fromisoformat(last['run_at'])
+        age = datetime.datetime.now(datetime.timezone.utc) - run_at
+        hours, rem = divmod(int(age.total_seconds()), 3600)
+        minutes = rem // 60
+        age_str = f'{hours}h {minutes}m ago' if hours else f'{minutes}m ago'
+        print(f'  Last run:     {run_at.strftime("%Y-%m-%d %H:%M UTC")}  ({age_str}, {last["trigger"]})')
+    else:
+        print('  Last run:     never')
+    print(f'  Total runs:   {s["run_total"]}')
+
+    print()
+    print(f'  KV cache:     {s["kv_live"]} live entries, {s["kv_expired"]} expired')
+    print(f'  Play history: {s["ph_plays"]} plays · {s["ph_tracks"]} tracks · {s["ph_artists"]} artists')
+    print()
+
+
 # ── Concert fetching ─────────────────────────────────────────────────────────
 
 def fetch_all_concerts(window_days: int) -> "tuple[list[Concert], date]":
@@ -230,7 +262,7 @@ def cmd_status() -> None:
 
 # ── Core playlist build ───────────────────────────────────────────────────────
 
-def cmd_build(dry_run: bool = False) -> None:
+def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     config.validate_required()
 
     cache = Cache()
@@ -384,8 +416,320 @@ def cmd_build(dry_run: bool = False) -> None:
     playlist_id = sp.get_or_create_playlist(config.playlist_name, config.playlist_id)
     sp.update_playlist_tracks(playlist_id, track_uris)
 
+    cache.record_run(trigger)
+
     print(f'\nPlaylist updated: {total} tracks (~{total_min}m) from {sum(1 for a in artists.values() if a.selected_tracks)} artists')
     print(f'Open: https://open.spotify.com/playlist/{playlist_id}')
+
+
+# ── Discovery — location resolution ──────────────────────────────────────────
+
+def _try_ip_geolocation() -> 'tuple[str, str] | None':
+    """
+    Attempt to resolve the current location via IP geolocation.
+    Returns (latlong, city_label) on success, None on any failure.
+    """
+    import requests as _req
+    try:
+        resp = _req.get('http://ip-api.com/json', timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get('status') == 'success':
+            lat  = data['lat']
+            lon  = data['lon']
+            city = data.get('city', '')
+            return f'{lat},{lon}', city
+    except Exception as e:
+        logger.warning(f'IP geolocation failed: {e}')
+    return None
+
+
+def resolve_discovery_location(cache: 'Cache') -> 'tuple[str | None, str | None]':
+    """
+    Determine the location to use for concert discovery.
+    Returns (latlong, city) with exactly one non-None.
+
+    Resolution order on first run (no cached consent):
+      1. Prompt for IP geolocation consent; cache the answer permanently.
+      2. If consented and IP lookup succeeds → latlong.
+      3. Otherwise prompt for city name; fall through to latlong prompt if skipped.
+      4. If city skipped → prompt for lat,lng.
+
+    On subsequent runs the cached consent answer is reused; IP is re-attempted
+    each time if consented (location may change), falling back to config values
+    or a prompt if it fails.
+    """
+    IP_CONSENT_KEY = 'ip_geo_consent'
+    # ~10 years — effectively permanent; cleared by --clear-cache
+    IP_CONSENT_TTL = 10 * 365 * 24 * 3600
+
+    # Explicit config always takes priority — no prompting needed
+    if config.discovery_lat_lng:
+        return config.discovery_lat_lng, None
+    if config.discovery_location:
+        return None, config.discovery_location
+
+    # No config: try IP geolocation (with one-time consent prompt)
+    consent = cache.get(IP_CONSENT_KEY)
+    if consent is None:
+        answer = input(
+            '\nMay we use your IP address to automatically detect your location? [y/N]: '
+        ).strip().lower()
+        consent = 'yes' if answer in ('y', 'yes') else 'no'
+        cache.set(IP_CONSENT_KEY, consent, IP_CONSENT_TTL)
+
+    if consent == 'yes':
+        result = _try_ip_geolocation()
+        if result:
+            latlong, city_label = result
+            logger.info(f'Location detected via IP: {city_label} ({latlong})')
+            return latlong, None
+        print('IP geolocation failed — please enter your location manually.')
+
+    # Interactive fallback: prompt for city, then lat/lng
+    city = input(
+        'Enter your city for concert discovery (e.g. "Chicago, IL"), '
+        'or press Enter to enter coordinates: '
+    ).strip()
+    if city:
+        print(f'Tip: add DISCOVERY_LOCATION={city!r} to your .env to skip this prompt.')
+        return None, city
+
+    latlong = input('Enter coordinates as "lat,lng" (e.g. "41.85,-87.65"): ').strip()
+    if latlong:
+        print(f'Tip: add DISCOVERY_LAT_LNG={latlong!r} to your .env to skip this prompt.')
+        return latlong, None
+
+    raise ValueError(
+        'Could not determine location for concert discovery. '
+        'Set DISCOVERY_LOCATION or DISCOVERY_LAT_LNG in .env.'
+    )
+
+
+# ── Discovery playlist build ──────────────────────────────────────────────────
+
+def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
+    config.validate_discovery()
+
+    cache = Cache()
+    cache.clear_expired()
+
+    today = date.today()
+
+    # 1. Resolve location
+    latlong, city = resolve_discovery_location(cache)
+
+    # 2. Fetch upcoming local concerts from Ticketmaster
+    tm = TicketmasterClient(config.ticketmaster_api_key, cache)
+    logger.info('Fetching local concerts from Ticketmaster…')
+    concerts = tm.get_local_events(
+        window_days=config.discovery_window_days,
+        latlong=latlong,
+        city=city,
+        radius_miles=config.discovery_radius_miles,
+    )
+
+    if not concerts:
+        print('No upcoming concerts found in your area. Try increasing DISCOVERY_RADIUS_MILES.')
+        return
+
+    logger.info(f'Found {len(concerts)} artist slots across local events')
+
+    # 3. Authenticate with Spotify
+    sp_raw = get_spotify_client(
+        client_id=config.spotify_client_id,
+        redirect_uri=config.spotify_redirect_uri,
+        token_path=config.spotify_token_path,
+        open_browser=False,
+    )
+    sp = SpotifyClient(sp_raw)
+
+    # 4. Accumulate play history so familiarity scores improve over time
+    logger.info('Syncing play history…')
+    plays = sp.get_recently_played_with_artists(cache)
+    new_plays = cache.record_plays(plays)
+    logger.info(f'Recorded {new_plays} new play events')
+
+    # 5. Resolve each artist name → Spotify artist ID; deduplicate
+    logger.info('Resolving artists to Spotify profiles…')
+    artists: dict[str, Artist] = {}
+    seen: set[tuple[str, date]] = set()
+
+    for concert in concerts:
+        spotify_id = resolve_artist(
+            concert.artist_name,
+            sp_raw,
+            cache,
+            tm_spotify_id=concert.tm_spotify_id,
+        )
+        if not spotify_id:
+            continue
+
+        dedup = (spotify_id, concert.event_date)
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+
+        if spotify_id not in artists:
+            artists[spotify_id] = Artist(spotify_id=spotify_id, name=concert.artist_name)
+        artists[spotify_id].concerts.append(concert)
+
+    logger.info(f'Resolved {len(artists)} unique artists')
+    if not artists:
+        logger.warning('No artists could be resolved to Spotify profiles.')
+        return
+
+    candidate_ids = list(artists.keys())
+
+    # 6. Compute artist familiarity
+    logger.info('Computing artist familiarity…')
+    top_scores    = sp.get_artist_top_scores(cache)
+    play_counts   = cache.get_artist_play_counts()
+    familiarity   = compute_artist_familiarity_scores(candidate_ids, top_scores, play_counts)
+
+    # 7. Fetch Last.fm global popularity (optional)
+    raw_listeners: dict[str, int] = {}
+    if config.lastfm_api_key:
+        lastfm_client = LastFmClient(config.lastfm_api_key, cache)
+        logger.info('Fetching Last.fm artist popularity…')
+        for artist_id, artist in artists.items():
+            count = lastfm_client.get_artist_listeners(artist.name)
+            if count is not None:
+                raw_listeners[artist_id] = count
+
+    # 8. Score + select artists (floor + cap)
+    selected_ids, enjoyment_scores = select_discovery_artists(
+        candidate_ids=candidate_ids,
+        familiarity_scores=familiarity,
+        raw_listeners=raw_listeners,
+        max_artists=config.discovery_max_artists,
+        min_score=config.discovery_min_score,
+    )
+
+    if not selected_ids:
+        print('No artists scored above the minimum threshold for your area.')
+        return
+
+    artists = {aid: artists[aid] for aid in selected_ids}
+
+    # 9. Allocate duration budgets weighted by enjoyment × proximity
+    weights = compute_discovery_weights(artists, enjoyment_scores, today)
+    slots   = allocate_slots(
+        weights,
+        target_duration_ms=config.playlist_target_duration_minutes * 60_000,
+        min_duration_ms=0,   # every selected artist gets a slot; select_tracks rounds up to 1 track
+    )
+
+    # 10. Get track-level familiarity for scoring
+    logger.info('Fetching Spotify listening history…')
+    spotify_familiarity = sp.get_user_familiarity(cache)
+
+    # 11. Select tracks per artist (identical pipeline to prep playlist)
+    setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
+        if config.setlist_fm_api_key else None
+    lastfm_track_client = LastFmClient(config.lastfm_api_key, cache) \
+        if config.lastfm_api_key else None
+
+    for artist_id, duration_budget_ms in sorted(slots.items(), key=lambda x: -x[1]):
+        artist = artists[artist_id]
+        logger.info(f'  {artist.name}: fetching discography…')
+
+        tracks = sp.get_artist_tracks(artist_id, cache)
+        if not tracks:
+            logger.warning(f'  {artist.name}: no tracks found on Spotify')
+            continue
+
+        play_counts_artist = cache.get_play_counts(artist_id)
+        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else None
+        artist.lastfm_scores  = lastfm_track_client.get_popularity_scores(artist.name) if lastfm_track_client else None
+        artist.selected_tracks = select_tracks_for_artist(
+            tracks=tracks,
+            duration_budget_ms=duration_budget_ms,
+            spotify_familiarity=spotify_familiarity,
+            play_counts=play_counts_artist,
+            today=today,
+            setlist_scores=artist.setlist_scores,
+            lastfm_scores=artist.lastfm_scores,
+        )
+        chosen_ms = sum(t.duration_ms for t in artist.selected_tracks)
+        nearest   = min(c.days_until(today) for c in artist.concerts)
+        logger.info(
+            f'  {artist.name}: {len(artist.selected_tracks)} tracks '
+            f'(~{chosen_ms // 60_000}m, enjoyment={enjoyment_scores[artist_id]:.2f}, '
+            f'concert in {nearest}d)'
+        )
+
+    # 12. Flatten to ordered track list (highest-enjoyment artist first)
+    all_tracks: list[Track] = []
+    for artist_id in sorted(slots, key=lambda aid: -enjoyment_scores.get(aid, 0.0)):
+        all_tracks.extend(artists[artist_id].selected_tracks)
+
+    track_uris = [f'spotify:track:{t.id}' for t in all_tracks]
+    total      = len(track_uris)
+    total_min  = sum(t.duration_ms for t in all_tracks) // 60_000
+
+    # 13. Dry run: print summary and exit
+    if dry_run:
+        artists_with_tracks = sum(1 for a in artists.values() if a.selected_tracks)
+        print(f'\n=== DISCOVERY DRY RUN — {total} tracks (~{total_min}m) from {artists_with_tracks} artists ===\n')
+        for artist_id in sorted(slots, key=lambda aid: -enjoyment_scores.get(aid, 0.0)):
+            artist = artists[artist_id]
+            if not artist.selected_tracks:
+                continue
+            nearest   = min(c.days_until(today) for c in artist.concerts)
+            score     = enjoyment_scores[artist_id]
+            chosen_min = sum(t.duration_ms for t in artist.selected_tracks) // 60_000
+            venues    = ', '.join({c.venue for c in artist.concerts})
+            print(f'{artist.name}  (enjoyment={score:.2f}, {len(artist.selected_tracks)} tracks, ~{chosen_min}m, concert in {nearest}d @ {venues}):')
+            sl_scores = artist.setlist_scores or {}
+            lf_scores = artist.lastfm_scores  or {}
+            for t in artist.selected_tracks:
+                release = (t.release_date or '?')[:4]
+                dur     = t.duration_ms // 1000
+                name_key = t.name.lower().strip()
+                freq = sl_scores.get(name_key)
+                pop  = lf_scores.get(name_key)
+                sl_str = f'{freq:.0%}' if freq is not None else '—'
+                lf_str = f'{pop:.0%}'  if pop  is not None else '—'
+                print(f'  [sl:{sl_str:>4} lf:{lf_str:>4}] {t.name}  ({t.album_name}, {release}) [{dur//60}:{dur%60:02d}]')
+            print()
+        return
+
+    # 14. Update Spotify discovery playlist
+    playlist_id = sp.get_or_create_playlist(
+        config.discovery_playlist_name,
+        config.discovery_playlist_id,
+        description='Auto-updated: concerts in your area you should check out',
+    )
+
+    # Persist playlist ID to .env if newly created
+    if not config.discovery_playlist_id:
+        _write_env_value('DISCOVERY_PLAYLIST_ID', playlist_id)
+        config.discovery_playlist_id = playlist_id
+
+    sp.update_playlist_tracks(playlist_id, track_uris)
+    cache.record_run(trigger)
+
+    print(f'\nDiscovery playlist updated: {total} tracks (~{total_min}m) from {sum(1 for a in artists.values() if a.selected_tracks)} artists')
+    print(f'Open: https://open.spotify.com/playlist/{playlist_id}')
+
+
+def _write_env_value(key: str, value: str) -> None:
+    """Append or update a key in the .env file."""
+    env_path = ENV_FILE
+    if not env_path.exists():
+        env_path.write_text(f'{key}={value}\n')
+        return
+    lines = env_path.read_text().splitlines()
+    updated = False
+    for i, line in enumerate(lines):
+        if line.startswith(f'{key}=') or line.startswith(f'{key} ='):
+            lines[i] = f'{key}={value}'
+            updated = True
+            break
+    if not updated:
+        lines.append(f'{key}={value}')
+    env_path.write_text('\n'.join(lines) + '\n')
 
 
 # ── CLI entrypoint ────────────────────────────────────────────────────────────
@@ -399,8 +743,12 @@ def main() -> None:
     group.add_argument('--update',      action='store_true', help='Update the playlist (cron)')
     group.add_argument('--status',      action='store_true', help='Show upcoming concerts')
     group.add_argument('--dry-run',     action='store_true', help='Preview without modifying')
-    group.add_argument('--clear-cache', action='store_true', help='Clear all cached data (discographies, artist lookups)')
+    group.add_argument('--clear-cache',        action='store_true', help='Clear all cached data (discographies, artist lookups)')
+    group.add_argument('--cache-status',       action='store_true', help='Show cache stats and last run info')
+    group.add_argument('--discover',           action='store_true', help='Build discovery playlist from local concerts')
+    group.add_argument('--discover-dry-run',   action='store_true', help='Preview discovery playlist without writing to Spotify')
     parser.add_argument('--verbose', '-v', action='store_true', help='Debug logging')
+    parser.add_argument('--cron', action='store_true', help='Mark this run as cron-triggered (used in run log)')
 
     args = parser.parse_args()
     if args.verbose:
@@ -408,12 +756,14 @@ def main() -> None:
 
     if args.setup:
         cmd_setup()
+    elif args.cache_status:
+        cmd_cache_status()
     elif args.clear_cache:
         counts = Cache().clear_all()
         print(f"Cache cleared ({counts['kv_cache']} entries removed). Play history preserved.")
     elif args.update:
         try:
-            cmd_build(dry_run=False)
+            cmd_build(dry_run=False, trigger='cron' if args.cron else 'manual')
         except (ValueError, RuntimeError) as e:
             print(f'Error: {e}', file=sys.stderr)
             sys.exit(1)
@@ -425,6 +775,18 @@ def main() -> None:
             sys.exit(1)
     elif args.status:
         cmd_status()
+    elif args.discover:
+        try:
+            cmd_discover(dry_run=False, trigger='cron' if args.cron else 'manual')
+        except (ValueError, RuntimeError) as e:
+            print(f'Error: {e}', file=sys.stderr)
+            sys.exit(1)
+    elif args.discover_dry_run:
+        try:
+            cmd_discover(dry_run=True)
+        except (ValueError, RuntimeError) as e:
+            print(f'Error: {e}', file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == '__main__':

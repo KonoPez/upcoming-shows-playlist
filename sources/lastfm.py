@@ -12,6 +12,7 @@ scaling to handle the power-law distribution of streaming counts.
 
 import logging
 import math
+from typing import Optional
 
 import requests
 
@@ -50,6 +51,45 @@ class LastFmClient:
         scores = self._fetch_popularity_scores(artist_name)
         self.cache.set(cache_key, scores, LASTFM_TTL)
         return scores
+
+    def get_artist_listeners(self, artist_name: str) -> Optional[int]:
+        """
+        Return the total listener count for an artist from Last.fm, or None on failure.
+        Used as a global popularity signal for discovery scoring; cached for LASTFM_TTL.
+        """
+        cache_key = f'lastfm_listeners:{artist_name.lower().strip()}'
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached if cached != -1 else None
+
+        count = self._fetch_artist_listeners(artist_name)
+        # Cache -1 as a sentinel for "no data" so we don't re-hit the API
+        self.cache.set(cache_key, count if count is not None else -1, LASTFM_TTL)
+        return count
+
+    def _fetch_artist_listeners(self, artist_name: str) -> Optional[int]:
+        try:
+            resp = requests.get(
+                BASE_URL,
+                params={
+                    'method': 'artist.getInfo',
+                    'artist': artist_name,
+                    'api_key': self.api_key,
+                    'format': 'json',
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.warning(f'Last.fm artist.getInfo error for "{artist_name}": {e}')
+            return None
+
+        artist_info = resp.json().get('artist', {})
+        try:
+            listeners = int(artist_info.get('stats', {}).get('listeners', 0))
+            return listeners if listeners > 0 else None
+        except (ValueError, TypeError):
+            return None
 
     def _fetch_popularity_scores(self, artist_name: str) -> dict[str, float]:
         try:

@@ -35,7 +35,10 @@ class SpotifyClient:
     # ── Playlist management ──────────────────────────────────────────────────
 
     def get_or_create_playlist(
-        self, name: str, playlist_id: Optional[str] = None
+        self,
+        name: str,
+        playlist_id: Optional[str] = None,
+        description: str = 'Auto-updated: tracks to prep for upcoming concerts',
     ) -> str:
         """
         Return the ID of the managed playlist.
@@ -58,7 +61,7 @@ class SpotifyClient:
         pl = self.sp._post('me/playlists', payload={
             'name': name,
             'public': False,
-            'description': 'Auto-updated: tracks to prep for upcoming concerts',
+            'description': description,
         })
         logger.info(f'Created playlist: "{name}" ({pl["id"]})')
         return pl['id']
@@ -145,6 +148,42 @@ class SpotifyClient:
 
         cache.set(cache_key, familiarity, FAMILIARITY_TTL)
         return familiarity
+
+    def get_artist_top_scores(self, cache: Cache) -> dict[str, float]:
+        """
+        Build a {artist_id: score} map from Spotify's top-artists API.
+        Mirrors get_user_familiarity but at the artist level.
+
+        Scores:
+          short_term top artists (≈4 weeks)   → 1.0
+          medium_term top artists (≈6 months) → 0.8
+          long_term top artists (years)        → 0.6
+        Artists in multiple lists get the highest score.
+        Cached for FAMILIARITY_TTL (6 h).
+        """
+        cache_key = 'artist_top_scores'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        scores: dict[str, float] = {}
+        for time_range, score in [
+            ('short_term', 1.0),
+            ('medium_term', 0.8),
+            ('long_term', 0.6),
+        ]:
+            try:
+                result = self.sp.current_user_top_artists(limit=50, time_range=time_range)
+                for artist in result.get('items', []):
+                    aid = artist.get('id')
+                    if aid:
+                        scores[aid] = max(scores.get(aid, 0.0), score)
+                time.sleep(API_DELAY)
+            except Exception as e:
+                logger.warning(f'Failed to fetch top artists ({time_range}): {e}')
+
+        cache.set(cache_key, scores, FAMILIARITY_TTL)
+        return scores
 
     def get_recently_played_with_artists(self, cache: Cache) -> list[Track]:
         """

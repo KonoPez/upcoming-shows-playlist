@@ -61,6 +61,12 @@ class Cache:
 
                 CREATE INDEX IF NOT EXISTS ph_artist ON play_history (artist_id);
                 CREATE INDEX IF NOT EXISTS ph_track  ON play_history (track_id);
+
+                CREATE TABLE IF NOT EXISTS run_log (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_at   TEXT NOT NULL,
+                    trigger  TEXT NOT NULL CHECK (trigger IN ('manual', 'cron'))
+                );
             ''')
 
     # ── Key-value cache ──────────────────────────────────────────────────────
@@ -123,6 +129,14 @@ class Cache:
                     logger.debug(f'Skipping play record: {e}')
         return inserted
 
+    def get_artist_play_counts(self) -> dict[str, int]:
+        """Return {artist_id: lifetime_play_count} for all artists in play history."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                'SELECT artist_id, COUNT(*) as cnt FROM play_history GROUP BY artist_id'
+            ).fetchall()
+        return {row['artist_id']: row['cnt'] for row in rows}
+
     def get_play_counts(self, artist_id: str) -> dict[str, int]:
         """Return {track_id: lifetime_play_count} for every track by a given artist."""
         with self._conn() as conn:
@@ -132,3 +146,52 @@ class Cache:
                 (artist_id,),
             ).fetchall()
         return {row['track_id']: row['cnt'] for row in rows}
+
+    # ── Run log ──────────────────────────────────────────────────────────────
+
+    def record_run(self, trigger: str) -> None:
+        """Record a completed playlist update. trigger must be 'manual' or 'cron'."""
+        import datetime
+        run_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                'INSERT INTO run_log (run_at, trigger) VALUES (?, ?)',
+                (run_at, trigger),
+            )
+
+    def get_last_run(self) -> 'Optional[dict]':
+        """Return {'run_at': ..., 'trigger': ...} for the most recent run, or None."""
+        with self._conn() as conn:
+            row = conn.execute(
+                'SELECT run_at, trigger FROM run_log ORDER BY id DESC LIMIT 1'
+            ).fetchone()
+        if row:
+            return {'run_at': row['run_at'], 'trigger': row['trigger']}
+        return None
+
+    def get_summary(self) -> dict:
+        """Return aggregate stats across all three tables for display."""
+        now = time.time()
+        with self._conn() as conn:
+            kv_total = conn.execute('SELECT COUNT(*) FROM kv_cache').fetchone()[0]
+            kv_live  = conn.execute('SELECT COUNT(*) FROM kv_cache WHERE expires_at > ?', (now,)).fetchone()[0]
+
+            ph_plays   = conn.execute('SELECT COUNT(*) FROM play_history').fetchone()[0]
+            ph_tracks  = conn.execute('SELECT COUNT(DISTINCT track_id) FROM play_history').fetchone()[0]
+            ph_artists = conn.execute('SELECT COUNT(DISTINCT artist_id) FROM play_history').fetchone()[0]
+
+            run_total = conn.execute('SELECT COUNT(*) FROM run_log').fetchone()[0]
+            last_run_row = conn.execute(
+                'SELECT run_at, trigger FROM run_log ORDER BY id DESC LIMIT 1'
+            ).fetchone()
+
+        return {
+            'kv_total': kv_total,
+            'kv_live': kv_live,
+            'kv_expired': kv_total - kv_live,
+            'ph_plays': ph_plays,
+            'ph_tracks': ph_tracks,
+            'ph_artists': ph_artists,
+            'run_total': run_total,
+            'last_run': dict(last_run_row) if last_run_row else None,
+        }
