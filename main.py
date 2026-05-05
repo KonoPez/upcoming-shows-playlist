@@ -525,6 +525,60 @@ def resolve_calendar_ids(
     return ids
 
 
+_DESCRIPTION_MAX = 300
+
+
+def _build_discovery_description(artists: dict, all_concerts: list) -> str:
+    """
+    Build a playlist description listing each event that contributed at least
+    one artist to the playlist.
+
+    Format per event:
+        MM/DD Headliner (Openers: Opener1, Opener2) at Venue
+        MM/DD Headliner at Venue   (when no selected openers)
+
+    Headliner is taken from the full concert list regardless of selection so
+    the event context is always clear.  Openers are only listed when they
+    appear in the selected artists set.  Events are sorted by date.
+    Events are joined with ' • ' and truncated to _DESCRIPTION_MAX chars.
+    """
+    from collections import defaultdict
+
+    selected_names: set = {a.name for a in artists.values()}
+
+    # Group the full TM list by (date, venue) to reconstruct bills
+    bills: dict = defaultdict(lambda: {'headliner': None, 'selected_openers': [], '_seen_openers': set()})
+    for concert in all_concerts:
+        key = (concert.event_date, concert.venue)
+        if not concert.is_opener:
+            bills[key]['headliner'] = concert.artist_name
+        elif concert.artist_name in selected_names:
+            if concert.artist_name not in bills[key]['_seen_openers']:
+                bills[key]['selected_openers'].append(concert.artist_name)
+                bills[key]['_seen_openers'].add(concert.artist_name)
+
+    lines = []
+    for (event_date, venue), bill in sorted(bills.items()):
+        headliner = bill['headliner']
+        openers   = bill['selected_openers']
+
+        headliner_selected = headliner in selected_names if headliner else False
+        if not headliner_selected and not openers:
+            continue  # no selected artist from this event
+
+        date_str = event_date.strftime('%m/%d')
+        if openers:
+            opener_str = ', '.join(openers)
+            lines.append(f'{date_str} {headliner} (Openers: {opener_str}) at {venue}')
+        else:
+            lines.append(f'{date_str} {headliner} at {venue}')
+
+    description = ' • '.join(lines)
+    if len(description) > _DESCRIPTION_MAX:
+        description = description[:_DESCRIPTION_MAX - 1] + '…'
+    return description
+
+
 def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     config.validate_discovery()
 
@@ -745,7 +799,6 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     playlist_id = sp.get_or_create_playlist(
         config.discovery_playlist_name,
         config.discovery_playlist_id,
-        description='Auto-updated: concerts in your area you should check out',
     )
 
     # Persist playlist ID to .env if newly created
@@ -753,6 +806,8 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         _write_env_value('DISCOVERY_PLAYLIST_ID', playlist_id)
         config.discovery_playlist_id = playlist_id
 
+    description = _build_discovery_description(artists, concerts)
+    sp.update_playlist_description(playlist_id, description)
     sp.update_playlist_tracks(playlist_id, track_uris)
     cache.record_run(trigger)
 

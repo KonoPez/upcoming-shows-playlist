@@ -648,3 +648,110 @@ class TestResolveCalendarIds:
         with patch('main.resolve_artist', return_value=None) as mock_resolve:
             resolve_calendar_ids(['A', 'B', 'C'], sp_raw=object(), cache=cache)
         assert mock_resolve.call_count == 3
+
+
+# ── _build_discovery_description ─────────────────────────────────────────────
+
+class TestBuildDiscoveryDescription:
+    """Tests for main._build_discovery_description."""
+
+    def _concert(self, artist_name, venue='The Venue', days=10, is_opener=False):
+        return Concert(
+            event_name=artist_name,
+            artist_name=artist_name,
+            event_date=_TODAY + timedelta(days=days),
+            venue=venue,
+            is_opener=is_opener,
+            source='ticketmaster_discovery',
+        )
+
+    def _artist(self, name, days=10):
+        return Artist(
+            spotify_id=name,
+            name=name,
+            concerts=[self._concert(name, days=days, is_opener=False)],
+        )
+
+    def _run(self, artists: dict, all_concerts: list) -> str:
+        from main import _build_discovery_description
+        return _build_discovery_description(artists, all_concerts)
+
+    def test_single_headliner_no_openers(self):
+        artists = {'id1': self._artist('Headliner')}
+        concerts = [self._concert('Headliner')]
+        result = self._run(artists, concerts)
+        assert result == f'{(_TODAY + timedelta(days=10)).strftime("%m/%d")} Headliner at The Venue'
+
+    def test_headliner_with_selected_opener(self):
+        opener = self._concert('Opener', is_opener=True)
+        headliner = self._concert('Headliner', is_opener=False)
+        artists = {
+            'h': Artist(spotify_id='h', name='Headliner', concerts=[headliner]),
+            'o': Artist(spotify_id='o', name='Opener', concerts=[opener]),
+        }
+        result = self._run(artists, [headliner, opener])
+        date_str = (_TODAY + timedelta(days=10)).strftime('%m/%d')
+        assert result == f'{date_str} Headliner (Openers: Opener) at The Venue'
+
+    def test_unselected_opener_not_listed(self):
+        """An opener not in the artists dict should not appear in the description."""
+        headliner = self._concert('Headliner', is_opener=False)
+        unselected_opener = self._concert('Unknown Opener', is_opener=True)
+        artists = {'h': Artist(spotify_id='h', name='Headliner', concerts=[headliner])}
+        result = self._run(artists, [headliner, unselected_opener])
+        assert 'Unknown Opener' not in result
+        assert 'Openers' not in result
+
+    def test_selected_opener_unselected_headliner(self):
+        """If only the opener was selected, headliner still appears for context."""
+        headliner = self._concert('Big Act', is_opener=False)
+        opener = self._concert('Small Act', is_opener=True)
+        artists = {'o': Artist(spotify_id='o', name='Small Act', concerts=[opener])}
+        result = self._run(artists, [headliner, opener])
+        assert 'Big Act' in result
+        assert 'Small Act' in result
+
+    def test_multiple_events_sorted_by_date(self):
+        c1 = self._concert('Artist A', days=20)
+        c2 = self._concert('Artist B', days=5)
+        artists = {
+            'a': Artist(spotify_id='a', name='Artist A', concerts=[c1]),
+            'b': Artist(spotify_id='b', name='Artist B', concerts=[c2]),
+        }
+        result = self._run(artists, [c1, c2])
+        assert result.index('Artist B') < result.index('Artist A')
+
+    def test_event_with_no_selected_artists_excluded(self):
+        selected = self._concert('Selected', venue='Venue A')
+        irrelevant = self._concert('Irrelevant', venue='Venue B')
+        artists = {'s': Artist(spotify_id='s', name='Selected', concerts=[selected])}
+        result = self._run(artists, [selected, irrelevant])
+        assert 'Irrelevant' not in result
+
+    def test_truncates_at_300_chars(self):
+        # Build enough events to exceed 300 chars
+        concerts = []
+        artists = {}
+        for i in range(10):
+            name = f'Artist With A Very Long Name Number {i}'
+            c = self._concert(name, venue='A Very Long Venue Name Indeed', days=i + 1)
+            concerts.append(c)
+            artists[str(i)] = Artist(spotify_id=str(i), name=name, concerts=[c])
+        result = self._run(artists, concerts)
+        assert len(result) <= 300
+
+    def test_empty_artists_returns_empty_string(self):
+        result = self._run({}, [])
+        assert result == ''
+
+    def test_multiple_openers_joined_with_comma(self):
+        headliner = self._concert('Headliner', is_opener=False)
+        op1 = self._concert('Opener 1', is_opener=True)
+        op2 = self._concert('Opener 2', is_opener=True)
+        artists = {
+            'h':  Artist(spotify_id='h',  name='Headliner', concerts=[headliner]),
+            'o1': Artist(spotify_id='o1', name='Opener 1',  concerts=[op1]),
+            'o2': Artist(spotify_id='o2', name='Opener 2',  concerts=[op2]),
+        }
+        result = self._run(artists, [headliner, op1, op2])
+        assert 'Opener 1, Opener 2' in result or 'Opener 2, Opener 1' in result

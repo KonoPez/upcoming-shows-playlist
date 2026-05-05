@@ -66,6 +66,10 @@ class SpotifyClient:
         logger.info(f'Created playlist: "{name}" ({pl["id"]})')
         return pl['id']
 
+    def update_playlist_description(self, playlist_id: str, description: str) -> None:
+        """Update the description field of an existing playlist."""
+        self.sp._put(f'playlists/{playlist_id}', payload={'description': description})
+
     def update_playlist_tracks(self, playlist_id: str, track_uris: list[str]) -> None:
         """
         Atomically replace the playlist's contents.
