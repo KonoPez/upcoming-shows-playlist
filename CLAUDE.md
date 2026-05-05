@@ -30,7 +30,7 @@ python main.py --update --cron      # mark this run as cron-triggered in the run
 python -m pytest tests/ -v
 ```
 
-369 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~12 seconds.
+384 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~12 seconds.
 
 ## Project layout
 
