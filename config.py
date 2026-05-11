@@ -61,6 +61,7 @@ class Config:
     discovery_window_days: int = 60
     discovery_max_artists: int = 10
     discovery_min_score: float = 0.10
+    discovery_target_duration_minutes: int = 90
 
     # Playlist tuning
     concert_window_days: int = 90

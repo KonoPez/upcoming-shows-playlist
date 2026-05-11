@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = 'http://ws.audioscrobbler.com/2.0/'
 LASTFM_TTL = 7 * 24 * 3600   # 7 days — play counts shift slowly
 MAX_TRACKS = 50
+MAX_SIMILAR = 50
 
 
 def _normalize_title(name: str) -> str:
@@ -66,6 +67,53 @@ class LastFmClient:
         # Cache -1 as a sentinel for "no data" so we don't re-hit the API
         self.cache.set(cache_key, count if count is not None else -1, LASTFM_TTL)
         return count
+
+    def get_similar_artists(self, artist_name: str) -> dict[str, float]:
+        """
+        Return {similar_artist_name: similarity_weight} for an artist.
+
+        Weights are Last.fm's 0–1 similarity scores.  Returns {} when Last.fm
+        has no data or on network error.  Results cached for LASTFM_TTL.
+        """
+        cache_key = f'lastfm_similar:{artist_name.lower().strip()}'
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        result = self._fetch_similar_artists(artist_name)
+        self.cache.set(cache_key, result, LASTFM_TTL)
+        return result
+
+    def _fetch_similar_artists(self, artist_name: str) -> dict[str, float]:
+        try:
+            resp = requests.get(
+                BASE_URL,
+                params={
+                    'method': 'artist.getSimilar',
+                    'artist': artist_name,
+                    'api_key': self.api_key,
+                    'format': 'json',
+                    'limit': MAX_SIMILAR,
+                    'autocorrect': 1,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.warning(f'Last.fm artist.getSimilar error for "{artist_name}": {e}')
+            return {}
+
+        similar = resp.json().get('similarartists', {}).get('artist', [])
+        result: dict[str, float] = {}
+        for entry in similar:
+            name = entry.get('name', '').strip()
+            try:
+                weight = float(entry.get('match', 0))
+            except (ValueError, TypeError):
+                weight = 0.0
+            if name and weight > 0:
+                result[name.lower()] = weight
+        return result
 
     def _fetch_artist_listeners(self, artist_name: str) -> Optional[int]:
         try:

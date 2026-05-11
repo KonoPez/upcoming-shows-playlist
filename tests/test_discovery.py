@@ -80,7 +80,7 @@ def _tm_event(
 
 class TestScoreArtistEnjoyment:
     def test_no_popularity_returns_familiarity(self):
-        assert score_artist_enjoyment(0.8, None) == 0.8
+        assert score_artist_enjoyment(0.8, None) == pytest.approx(0.8)
 
     def test_zero_familiarity_no_popularity_is_zero(self):
         assert score_artist_enjoyment(0.0, None) == 0.0
@@ -106,6 +106,25 @@ class TestScoreArtistEnjoyment:
     def test_weights_sum_to_one_when_both_available(self):
         # With fam=0 and pop=0, both signals present → score should be 0
         assert score_artist_enjoyment(0.0, 0.0) == 0.0
+
+    def test_similarity_raises_score(self):
+        without = score_artist_enjoyment(0.0, None, similarity=None)
+        with_sim = score_artist_enjoyment(0.0, None, similarity=1.0)
+        assert with_sim > without
+
+    def test_all_three_signals_blended(self):
+        from playlist_logic.discovery_weighting import SIMILARITY_W
+        fam, pop, sim = 1.0, 1.0, 1.0
+        total_w = FAMILIARITY_W + POPULARITY_W + SIMILARITY_W
+        expected = (FAMILIARITY_W + POPULARITY_W + SIMILARITY_W) / total_w
+        assert score_artist_enjoyment(fam, pop, sim) == pytest.approx(expected)
+
+    def test_all_three_full_scores_to_one(self):
+        assert score_artist_enjoyment(1.0, 1.0, 1.0) == pytest.approx(1.0)
+
+    def test_normalization_preserves_relative_weight(self):
+        # With only familiarity available, the result should equal familiarity exactly
+        assert score_artist_enjoyment(0.6, None, None) == pytest.approx(0.6)
 
 
 # ── compute_artist_familiarity_scores ─────────────────────────────────────────
@@ -592,6 +611,143 @@ class TestGetArtistListeners:
             client.get_artist_listeners('Artist')
         stored_value = cache.set.call_args[0][1]
         assert stored_value == -1   # sentinel stored, not None
+
+
+# ── LastFmClient.get_similar_artists ─────────────────────────────────────────
+
+class TestGetSimilarArtists:
+    def _client(self, stored=None):
+        from sources.lastfm import LastFmClient
+        cache = MagicMock()
+        cache.get.return_value = stored
+        return LastFmClient('fake-key', cache)
+
+    def _response(self, pairs):
+        """pairs: list of (name, match_score)"""
+        return {
+            'similarartists': {
+                'artist': [{'name': n, 'match': str(m)} for n, m in pairs]
+            }
+        }
+
+    def test_returns_name_weight_dict(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._response([('Radiohead', '0.9'), ('Portishead', '0.7')])
+        mock_resp.raise_for_status.return_value = None
+        with patch('sources.lastfm.requests.get', return_value=mock_resp):
+            result = self._client().get_similar_artists('Massive Attack')
+        assert result == {'radiohead': pytest.approx(0.9), 'portishead': pytest.approx(0.7)}
+
+    def test_names_are_lowercased(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._response([('Nine Inch Nails', '0.8')])
+        mock_resp.raise_for_status.return_value = None
+        with patch('sources.lastfm.requests.get', return_value=mock_resp):
+            result = self._client().get_similar_artists('Artist')
+        assert 'nine inch nails' in result
+
+    def test_returns_cached_without_api_call(self):
+        cached = {'bon iver': 0.85}
+        client = self._client(stored=cached)
+        with patch('sources.lastfm.requests.get') as mock_get:
+            result = client.get_similar_artists('Artist')
+            mock_get.assert_not_called()
+        assert result == cached
+
+    def test_api_error_returns_empty(self):
+        import requests as req
+        with patch('sources.lastfm.requests.get', side_effect=req.RequestException('timeout')):
+            result = self._client().get_similar_artists('Artist')
+        assert result == {}
+
+    def test_empty_response_returns_empty(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'similarartists': {'artist': []}}
+        mock_resp.raise_for_status.return_value = None
+        with patch('sources.lastfm.requests.get', return_value=mock_resp):
+            result = self._client().get_similar_artists('Artist')
+        assert result == {}
+
+    def test_zero_weight_entries_excluded(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._response([('Good Artist', '0.8'), ('Zero Artist', '0.0')])
+        mock_resp.raise_for_status.return_value = None
+        with patch('sources.lastfm.requests.get', return_value=mock_resp):
+            result = self._client().get_similar_artists('Artist')
+        assert 'zero artist' not in result
+
+    def test_result_cached_after_fetch(self):
+        from sources.lastfm import LastFmClient
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._response([('Some Artist', '0.5')])
+        mock_resp.raise_for_status.return_value = None
+        cache = MagicMock()
+        cache.get.return_value = None
+        client = LastFmClient('fake-key', cache)
+        with patch('sources.lastfm.requests.get', return_value=mock_resp):
+            client.get_similar_artists('Artist')
+        cache.set.assert_called_once()
+
+
+# ── compute_artist_similarity_scores ─────────────────────────────────────────
+
+class TestComputeArtistSimilarityScores:
+    from playlist_logic.discovery_weighting import compute_artist_similarity_scores
+
+    def _run(self, candidate_names, taste_profile, similar_map):
+        """
+        similar_map: {artist_name: {similar_name_lower: weight}}
+        """
+        from playlist_logic.discovery_weighting import compute_artist_similarity_scores
+        lastfm = MagicMock()
+        lastfm.get_similar_artists.side_effect = lambda name: similar_map.get(name, {})
+        return compute_artist_similarity_scores(candidate_names, taste_profile, lastfm)
+
+    def test_unknown_artist_scores_zero(self):
+        result = self._run(['Unknown'], taste_profile={}, similar_map={'Unknown': {}})
+        assert result['Unknown'] == 0.0
+
+    def test_artist_similar_to_known_scores_above_zero(self):
+        taste = {'radiohead': 1.0}
+        similar = {'Candidate': {'radiohead': 0.9}}
+        result = self._run(['Candidate'], taste, similar)
+        assert result['Candidate'] > 0.0
+
+    def test_higher_taste_match_gives_higher_score(self):
+        taste = {'radiohead': 1.0, 'portishead': 0.5}
+        strong = {'Strong': {'radiohead': 0.9}}
+        weak   = {'Weak':   {'portishead': 0.3}}
+        r_strong = self._run(['Strong'], taste, strong)
+        r_weak   = self._run(['Weak'],   taste, weak)
+        assert r_strong['Strong'] >= r_weak['Weak']
+
+    def test_scores_normalised_between_zero_and_one(self):
+        taste = {'radiohead': 1.0}
+        similar = {
+            'A': {'radiohead': 0.9},
+            'B': {'radiohead': 0.5},
+            'C': {},
+        }
+        result = self._run(['A', 'B', 'C'], taste, similar)
+        for v in result.values():
+            assert 0.0 <= v <= 1.0
+
+    def test_top_scorer_normalises_to_one(self):
+        taste = {'radiohead': 1.0}
+        similar = {'Best': {'radiohead': 1.0}, 'Worse': {'radiohead': 0.5}}
+        result = self._run(['Best', 'Worse'], taste, similar)
+        assert result['Best'] == pytest.approx(1.0)
+
+    def test_all_zero_raw_scores_returns_all_zero(self):
+        result = self._run(['A', 'B'], taste_profile={}, similar_map={'A': {}, 'B': {}})
+        assert result == {'A': 0.0, 'B': 0.0}
+
+    def test_get_similar_called_once_per_candidate(self):
+        from playlist_logic.discovery_weighting import compute_artist_similarity_scores
+        lastfm = MagicMock()
+        lastfm.get_similar_artists.return_value = {}
+        compute_artist_similarity_scores(['A', 'B', 'C'], {}, lastfm)
+        assert lastfm.get_similar_artists.call_count == 3
 
 
 # ── resolve_calendar_ids ──────────────────────────────────────────────────────

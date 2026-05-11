@@ -5,7 +5,7 @@ High-level Spotify operations: playlist management, user history, discography fe
 import logging
 import re
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import spotipy
 
@@ -19,6 +19,11 @@ FAMILIARITY_TTL = 6 * 3600            # 6 hours — top tracks don't shift meani
 RECENTLY_PLAYED_TTL = 5 * 60          # 5 min — deduplicates the two callers within a single run
 API_DELAY = 0.1                        # 100 ms between calls
 MAX_ALBUMS_PER_ARTIST = 15            # most recent studio albums + singles
+
+
+class ArtistTopScore(NamedTuple):
+    name: str
+    score: float
 
 
 class SpotifyClient:
@@ -153,10 +158,10 @@ class SpotifyClient:
         cache.set(cache_key, familiarity, FAMILIARITY_TTL)
         return familiarity
 
-    def get_artist_top_scores(self, cache: Cache) -> dict[str, float]:
+    def get_artist_top_scores(self, cache: Cache) -> dict[str, ArtistTopScore]:
         """
-        Build a {artist_id: score} map from Spotify's top-artists API.
-        Mirrors get_user_familiarity but at the artist level.
+        Build a {artist_id: ArtistTopScore(name, score)} map from Spotify's
+        top-artists API.  Mirrors get_user_familiarity but at the artist level.
 
         Scores:
           short_term top artists (≈4 weeks)   → 1.0
@@ -165,12 +170,16 @@ class SpotifyClient:
         Artists in multiple lists get the highest score.
         Cached for FAMILIARITY_TTL (6 h).
         """
-        cache_key = 'artist_top_scores'
+        cache_key = 'artist_top_scores_v2'
         cached = cache.get(cache_key)
         if cached is not None:
-            return cached
+            # NamedTuples round-trip through JSON as lists; reconstruct
+            return {
+                aid: ArtistTopScore(*v) if isinstance(v, list) else v
+                for aid, v in cached.items()
+            }
 
-        scores: dict[str, float] = {}
+        scores: dict[str, ArtistTopScore] = {}
         for time_range, score in [
             ('short_term', 1.0),
             ('medium_term', 0.8),
@@ -179,9 +188,10 @@ class SpotifyClient:
             try:
                 result = self.sp.current_user_top_artists(limit=50, time_range=time_range)
                 for artist in result.get('items', []):
-                    aid = artist.get('id')
-                    if aid:
-                        scores[aid] = max(scores.get(aid, 0.0), score)
+                    aid  = artist.get('id')
+                    name = artist.get('name', '')
+                    if aid and aid not in scores:
+                        scores[aid] = ArtistTopScore(name=name, score=score)
                 time.sleep(API_DELAY)
             except Exception as e:
                 logger.warning(f'Failed to fetch top artists ({time_range}): {e}')

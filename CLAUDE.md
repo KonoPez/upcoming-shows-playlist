@@ -137,9 +137,9 @@ These weights are intentionally permissive — the min score floor (0.10) is kep
 
 *Slot allocation*:
 ```
-allocation_weight = enjoyment^1.5 * proximity^0.3
+allocation_weight = enjoyment^1.5 * proximity^1.0
 ```
-The proximity exponent (0.3) is intentionally soft — for a discovery playlist you're deciding whether to buy a ticket, so a show 55 days out deserves nearly as much sample time as one in 13 days. `min_duration_ms=0` is passed to `allocate_slots` so every selected artist always receives a non-zero budget and therefore at least 1 track.
+`min_duration_ms=0` is passed to `allocate_slots` so every selected artist always receives a non-zero budget and therefore at least 1 track.
 
 **Artist familiarity (discovery)** (`SpotifyClient.get_artist_top_scores`): mirrors `get_user_familiarity` but at artist level. Short-term top artists → 1.0, medium-term → 0.8, long-term → 0.6. Cached 6 hours. Combined with play-history scores via `max()` in `compute_artist_familiarity_scores`.
 

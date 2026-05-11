@@ -30,6 +30,7 @@ from playlist_logic.weighting import compute_artist_weights, allocate_slots
 from playlist_logic.scoring import select_tracks_for_artist
 from playlist_logic.discovery_weighting import (
     compute_artist_familiarity_scores,
+    compute_artist_similarity_scores,
     select_discovery_artists,
     compute_discovery_weights,
 )
@@ -683,19 +684,35 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     # 9. Compute artist familiarity
     logger.info('Computing artist familiarity…')
-    top_scores    = sp.get_artist_top_scores(cache)
-    play_counts   = cache.get_artist_play_counts()
-    familiarity   = compute_artist_familiarity_scores(candidate_ids, top_scores, play_counts)
+    top_scores  = sp.get_artist_top_scores(cache)
+    play_counts = cache.get_artist_play_counts()
+    # extract {id: score} for familiarity; {name_lower: score} for similarity taste profile
+    top_score_values = {aid: v.score for aid, v in top_scores.items()}
+    taste_profile    = {v.name.lower(): v.score for v in top_scores.values()}
+    familiarity = compute_artist_familiarity_scores(candidate_ids, top_score_values, play_counts)
 
-    # 10. Fetch Last.fm global popularity (optional)
+    # 10. Fetch Last.fm signals (optional — skipped if LASTFM_API_KEY not set)
     raw_listeners: dict[str, int] = {}
+    similarity_by_id: dict[str, float] = {}
     if config.lastfm_api_key:
         lastfm_client = LastFmClient(config.lastfm_api_key, cache)
+
         logger.info('Fetching Last.fm artist popularity…')
         for artist_id, artist in artists.items():
             count = lastfm_client.get_artist_listeners(artist.name)
             if count is not None:
                 raw_listeners[artist_id] = count
+
+        logger.info('Fetching Last.fm artist similarity…')
+        candidate_names = [artists[aid].name for aid in candidate_ids]
+        sim_by_name = compute_artist_similarity_scores(
+            candidate_names, taste_profile, lastfm_client
+        )
+        # convert name-keyed → id-keyed for select_discovery_artists
+        similarity_by_id = {
+            aid: sim_by_name.get(artists[aid].name.lower(), 0.0)
+            for aid in candidate_ids
+        }
 
     # 11. Score + select artists (floor + cap)
     selected_ids, enjoyment_scores = select_discovery_artists(
@@ -704,6 +721,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         raw_listeners=raw_listeners,
         max_artists=config.discovery_max_artists,
         min_score=config.discovery_min_score,
+        similarity_scores=similarity_by_id if similarity_by_id else None,
     )
 
     if not selected_ids:
@@ -716,7 +734,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     weights = compute_discovery_weights(artists, enjoyment_scores, today)
     slots   = allocate_slots(
         weights,
-        target_duration_ms=config.playlist_target_duration_minutes * 60_000,
+        target_duration_ms=config.discovery_target_duration_minutes * 60_000,
         min_duration_ms=0,   # every selected artist gets a slot; select_tracks rounds up to 1 track
     )
 
