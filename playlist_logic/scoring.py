@@ -33,10 +33,10 @@ from sources.models import Track
 
 logger = logging.getLogger(__name__)
 
-LASTFM_W  = 0.25
+LASTFM_W  = 0.20
 SETLIST_W = 0.45
-RECENCY_W = 0.15
-NOVELTY_W = 0.15
+RECENCY_W = 0.10
+NOVELTY_W = 0.25
 
 RECENCY_WINDOW_DAYS = 548   # 18 months
 FAMILIAR_AT_N_PLAYS = 10    # play count that maxes out familiarity

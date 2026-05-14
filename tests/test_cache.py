@@ -111,3 +111,38 @@ class TestPlayHistory:
         cache.record_plays(batch1)
         cache.record_plays(batch2)
         assert cache.get_play_counts('a1') == {'t1': 6}
+
+
+# ── Discovery blocklist ───────────────────────────────────────────────────────
+
+class TestDiscoveryBlocklist:
+    def test_empty_blocklist(self, cache):
+        assert cache.get_blocked_artists() == {}
+
+    def test_add_and_retrieve(self, cache):
+        cache.add_blocked_artist('id1', 'Artist One')
+        assert cache.get_blocked_artists() == {'id1': 'Artist One'}
+
+    def test_add_multiple(self, cache):
+        cache.add_blocked_artist('id1', 'Artist One')
+        cache.add_blocked_artist('id2', 'Artist Two')
+        assert cache.get_blocked_artists() == {'id1': 'Artist One', 'id2': 'Artist Two'}
+
+    def test_add_idempotent(self, cache):
+        cache.add_blocked_artist('id1', 'Artist One')
+        cache.add_blocked_artist('id1', 'Artist One')
+        assert len(cache.get_blocked_artists()) == 1
+
+    def test_remove_existing(self, cache):
+        cache.add_blocked_artist('id1', 'Artist One')
+        removed = cache.remove_blocked_artist('id1')
+        assert removed is True
+        assert cache.get_blocked_artists() == {}
+
+    def test_remove_nonexistent_returns_false(self, cache):
+        assert cache.remove_blocked_artist('ghost') is False
+
+    def test_blocklist_not_cleared_by_clear_all(self, cache):
+        cache.add_blocked_artist('id1', 'Artist One')
+        cache.clear_all()
+        assert cache.get_blocked_artists() == {'id1': 'Artist One'}

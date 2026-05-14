@@ -19,6 +19,9 @@ python main.py --dry-run            # preview prep playlist without writing to S
 python main.py --status             # print upcoming concerts, no writes
 python main.py --discover           # fetch local concerts, score artists, write discovery playlist (cron)
 python main.py --discover-dry-run   # preview discovery playlist without writing to Spotify
+python main.py --block-artist NAME  # block an artist from future discovery runs (matches by name against current playlist)
+python main.py --unblock-artist NAME # remove an artist from the discovery blocklist
+python main.py --list-blocked       # list all blocked artists
 python main.py --cache-status       # show cache stats and last run info
 python main.py --clear-cache        # clear all cached data (preserves play history and run log)
 python main.py --update --cron      # mark this run as cron-triggered in the run log
@@ -111,7 +114,7 @@ On the first `--discover` run the user is asked for IP geolocation consent; the 
 
 **Artist resolution**: Calendar title → artist name via `artist_resolver.extract_artist_from_calendar_title` (strips "Ticket(s): " prefixes, venue/tour suffixes, etc.), then `split_artist_names` for multi-artist bills. `split_artist_names` only splits on bare commas/& when the structure unambiguously signals a list (≥2 commas, or comma + conjunction) — a single lone comma is kept intact to avoid breaking band names like "Black Country, New Road". Spotify search uses quoted phrases (`artist:"Name"`) to prevent Lucene splitting on commas. Results cached 90 days; failures cached 1 day so bug fixes take effect quickly.
 
-**Spotify API wrappers**: Several spotipy wrapper methods pass `None` kwargs (e.g. `market=None`, `country=None`) which get serialized as the string `"None"` in query params, causing 400/403 errors. Affected methods use `sp._get()` directly with params embedded in the URL string: `_get_artist_albums` (avoids `album%2Csingle` encoding and `country=None`), `_get_popularity_batch` (avoids `market=None` 403). `_get_artist_albums` also retries with `limit //= 2` on 400 for artists with non-standard limit caps; spotipy's logger is suppressed only during the retry attempt to avoid noisy ERROR logs for handled errors.
+**Spotify API wrappers**: Several spotipy wrapper methods pass `None` kwargs (e.g. `market=None`, `country=None`) which get serialized as the string `"None"` in query params, causing 400/403 errors. Affected methods use `sp._get()` directly with params embedded in the URL string: `_get_artist_albums` (avoids `album%2Csingle` encoding and `country=None`), `_get_popularity_batch` (avoids `market=None` 403), `get_playlist_artists` (avoids `market=None` 400). `_get_artist_albums` also retries with `limit //= 2` on 400 for artists with non-standard limit caps; spotipy's logger is suppressed only during the retry attempt to avoid noisy ERROR logs for handled errors. **General rule**: any spotipy wrapper that accepts `market`, `country`, or similar optional kwargs should be replaced with `sp._get()` using an inline query string.
 
 **Variant recording filter**: `client._is_variant_recording(track_name, album_name)` skips live, acoustic, unplugged, remix, instrumental, and demo recordings before they enter the scoring pipeline. Album-level check (e.g. "Live at X", "Unplugged", "Remixes") skips the whole album. Track-level check matches both parenthetical suffixes (e.g. "Song (Live)") and dash suffixes (e.g. "Song - Acoustic", "Song - Demo") to avoid false positives on artistic titles like "Live Wire".
 
@@ -143,10 +146,11 @@ allocation_weight = enjoyment^1.5 * proximity^1.0
 
 **Artist familiarity (discovery)** (`SpotifyClient.get_artist_top_scores`): mirrors `get_user_familiarity` but at artist level. Short-term top artists → 1.0, medium-term → 0.8, long-term → 0.6. Cached 6 hours. Combined with play-history scores via `max()` in `compute_artist_familiarity_scores`.
 
-**Cache** (`~/.concert-playlist/cache.db`): SQLite with three tables:
+**Cache** (`~/.concert-playlist/cache.db`): SQLite with four tables:
 - `kv_cache` — TTL-based, stores artist resolutions, discographies, API responses
 - `play_history` — append-only, accumulates plays across runs to improve novelty/familiarity scores over time
 - `run_log` — records each successful `--update` or `--discover` run with timestamp and trigger (`'manual'` or `'cron'`); readable via `--cache-status`; the `--cron` flag sets the trigger. IP geolocation consent is stored in `kv_cache` and cleared by `--clear-cache`.
+- `discovery_blocklist` — permanent artist exclusion list; populated via `--block-artist`; not cleared by `--clear-cache`. Artists are keyed by Spotify ID and matched against the current discovery playlist by name.
 
 **Cron setup** (`setup_cron.py`): interactive — asks whether to schedule the prep playlist, the discovery playlist, or both. Each gets its own crontab entry with a distinct marker comment so they can be installed/removed independently. Both use `--cron` flag so runs are correctly tagged in the run log.
 

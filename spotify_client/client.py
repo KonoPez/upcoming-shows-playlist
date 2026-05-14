@@ -71,6 +71,42 @@ class SpotifyClient:
         logger.info(f'Created playlist: "{name}" ({pl["id"]})')
         return pl['id']
 
+    def get_playlist_artists(self, playlist_id: str) -> list[tuple[str, str]]:
+        """
+        Return unique (artist_id, artist_name) pairs for every track in a playlist.
+        Only the primary (first) artist per track is included.
+
+        Uses sp.playlist_tracks() rather than sp._get() — the latter requires
+        additional_types=track to be set explicitly, otherwise Spotify returns 403.
+        """
+        seen: set[str] = set()
+        result: list[tuple[str, str]] = []
+        offset = 0
+        while True:
+            try:
+                resp = self.sp.playlist_tracks(playlist_id, limit=100, offset=offset)
+            except Exception as e:
+                logger.warning(f'Failed to fetch playlist items: {e}')
+                break
+            for item in resp.get('items', []):
+                # Spotify's playlist tracks endpoint returns the track object
+                # under the key 'item' (not 'track') in its current API version.
+                # 'track' in the response is a boolean field, not the object.
+                track = (item or {}).get('item') or {}
+                artists = track.get('artists', [])
+                if artists:
+                    primary = artists[0]
+                    aid  = primary.get('id')
+                    name = primary.get('name', '')
+                    if aid and aid not in seen:
+                        seen.add(aid)
+                        result.append((aid, name))
+            if resp.get('next') is None:
+                break
+            offset += 100
+            time.sleep(API_DELAY)
+        return result
+
     def update_playlist_description(self, playlist_id: str, description: str) -> None:
         """Update the description field of an existing playlist."""
         self.sp._put(f'playlists/{playlist_id}', payload={'description': description})

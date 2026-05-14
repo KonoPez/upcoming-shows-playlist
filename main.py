@@ -580,6 +580,86 @@ def _build_discovery_description(artists: dict, all_concerts: list) -> str:
     return description
 
 
+def cmd_list_blocked() -> None:
+    blocked = Cache().get_blocked_artists()
+    if not blocked:
+        print('No artists are currently blocked from discovery.')
+        return
+    print(f'\nBlocked from discovery ({len(blocked)}):')
+    for name in sorted(blocked.values(), key=str.lower):
+        print(f'  {name}')
+    print()
+
+
+def cmd_block_artist(name: str) -> None:
+    cache = Cache()
+    if not config.discovery_playlist_id:
+        print('No discovery playlist configured yet. Run --discover first.')
+        return
+
+    sp_raw = get_spotify_client(
+        client_id=config.spotify_client_id,
+        redirect_uri=config.spotify_redirect_uri,
+        token_path=config.spotify_token_path,
+        open_browser=False,
+    )
+    sp = SpotifyClient(sp_raw)
+
+    playlist_artists = sp.get_playlist_artists(config.discovery_playlist_id)
+    if not playlist_artists:
+        print('Discovery playlist is empty or could not be fetched.')
+        return
+
+    name_lower = name.lower()
+    matches = [(aid, aname) for aid, aname in playlist_artists if name_lower in aname.lower()]
+
+    if not matches:
+        print(f'No artist matching "{name}" found in the current discovery playlist.')
+        print('Artists in playlist:')
+        for _, aname in playlist_artists:
+            print(f'  {aname}')
+        return
+
+    if len(matches) > 1:
+        print(f'Multiple artists match "{name}" — be more specific:')
+        for _, aname in matches:
+            print(f'  {aname}')
+        return
+
+    artist_id, artist_name = matches[0]
+    confirm = input(f'Block "{artist_name}" from future discovery playlists? [y/N]: ').strip().lower()
+    if confirm in ('y', 'yes'):
+        cache.add_blocked_artist(artist_id, artist_name)
+        print(f'"{artist_name}" will be excluded from future discovery runs.')
+    else:
+        print('Cancelled.')
+
+
+def cmd_unblock_artist(name: str) -> None:
+    cache = Cache()
+    blocked = cache.get_blocked_artists()
+    if not blocked:
+        print('No artists are currently blocked.')
+        return
+
+    name_lower = name.lower()
+    match = next(
+        ((aid, aname) for aid, aname in blocked.items() if aname.lower() == name_lower),
+        None,
+    )
+
+    if not match:
+        print(f'"{name}" is not in the blocklist.')
+        print('Blocked artists:')
+        for aname in sorted(blocked.values(), key=str.lower):
+            print(f'  {aname}')
+        return
+
+    artist_id, artist_name = match
+    cache.remove_blocked_artist(artist_id)
+    print(f'"{artist_name}" removed from blocklist.')
+
+
 def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     config.validate_discovery()
 
@@ -678,6 +758,18 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             logger.info(f'Excluded {removed} already-booked artist(s) from discovery candidates')
         if not artists:
             print('All nearby artists are already in your concert calendar — nothing new to discover!')
+            return
+
+    # 8b. Filter blocked artists
+    blocked_ids = cache.get_blocked_artists()
+    if blocked_ids:
+        before = len(artists)
+        artists = {aid: a for aid, a in artists.items() if aid not in blocked_ids}
+        removed = before - len(artists)
+        if removed:
+            logger.info(f'Filtered {removed} blocked artist(s) from discovery candidates')
+        if not artists:
+            print('All nearby artists are either booked or blocked — nothing to discover!')
             return
 
     candidate_ids = list(artists.keys())
@@ -866,6 +958,9 @@ def main() -> None:
     group.add_argument('--cache-status',       action='store_true', help='Show cache stats and last run info')
     group.add_argument('--discover',           action='store_true', help='Build discovery playlist from local concerts')
     group.add_argument('--discover-dry-run',   action='store_true', help='Preview discovery playlist without writing to Spotify')
+    group.add_argument('--block-artist',   metavar='NAME', help='Block an artist from future discovery runs')
+    group.add_argument('--unblock-artist', metavar='NAME', help='Remove an artist from the discovery blocklist')
+    group.add_argument('--list-blocked',   action='store_true', help='List artists blocked from discovery')
     parser.add_argument('--verbose', '-v', action='store_true', help='Debug logging')
     parser.add_argument('--cron', action='store_true', help='Mark this run as cron-triggered (used in run log)')
 
@@ -906,6 +1001,12 @@ def main() -> None:
         except (ValueError, RuntimeError) as e:
             print(f'Error: {e}', file=sys.stderr)
             sys.exit(1)
+    elif args.block_artist:
+        cmd_block_artist(args.block_artist)
+    elif args.unblock_artist:
+        cmd_unblock_artist(args.unblock_artist)
+    elif args.list_blocked:
+        cmd_list_blocked()
 
 
 if __name__ == '__main__':

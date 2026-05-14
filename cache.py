@@ -67,6 +67,12 @@ class Cache:
                     run_at   TEXT NOT NULL,
                     trigger  TEXT NOT NULL CHECK (trigger IN ('manual', 'cron'))
                 );
+
+                CREATE TABLE IF NOT EXISTS discovery_blocklist (
+                    artist_id   TEXT PRIMARY KEY,
+                    artist_name TEXT NOT NULL,
+                    added_at    TEXT NOT NULL
+                );
             ''')
 
     # ── Key-value cache ──────────────────────────────────────────────────────
@@ -168,6 +174,33 @@ class Cache:
         if row:
             return {'run_at': row['run_at'], 'trigger': row['trigger']}
         return None
+
+    # ── Discovery blocklist ──────────────────────────────────────────────────
+
+    def add_blocked_artist(self, artist_id: str, artist_name: str) -> None:
+        """Add an artist to the discovery blocklist. Idempotent."""
+        import datetime
+        added_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                'INSERT OR REPLACE INTO discovery_blocklist (artist_id, artist_name, added_at) '
+                'VALUES (?, ?, ?)',
+                (artist_id, artist_name, added_at),
+            )
+
+    def remove_blocked_artist(self, artist_id: str) -> bool:
+        """Remove an artist from the blocklist. Returns True if a row was deleted."""
+        with self._conn() as conn:
+            conn.execute('DELETE FROM discovery_blocklist WHERE artist_id = ?', (artist_id,))
+            return conn.execute('SELECT changes()').fetchone()[0] > 0
+
+    def get_blocked_artists(self) -> dict[str, str]:
+        """Return {artist_id: artist_name} for every blocked artist."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                'SELECT artist_id, artist_name FROM discovery_blocklist'
+            ).fetchall()
+        return {row['artist_id']: row['artist_name'] for row in rows}
 
     def get_summary(self) -> dict:
         """Return aggregate stats across all three tables for display."""
