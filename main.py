@@ -18,13 +18,15 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import requests
+
 from config import config, APP_DIR
 from cache import Cache
 from artist_resolver import resolve_artist
-from sources.models import Artist, Concert, Track
+from sources.models import Artist, Concert, Track, normalize_track_name
 from sources.apple_calendar import AppleCalendarClient
 from sources.google_calendar import GoogleCalendarClient
-from spotify_client.client import SpotifyClient
+from spotify_client.client import SpotifyClient, deduplicate_tracks
 from spotify_client.auth import get_spotify_client
 from playlist_logic.weighting import compute_artist_weights, allocate_slots
 from playlist_logic.scoring import select_tracks_for_artist
@@ -46,6 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ENV_FILE = Path('.env')
+_ASSUMED_AVG_TRACK_MS = 210_000   # 3.5 min — used to convert min_tracks_per_artist to a duration floor
 
 
 # ── Setup ────────────────────────────────────────────────────────────────────
@@ -205,7 +208,10 @@ def cmd_cache_status() -> None:
 
 # ── Concert fetching ─────────────────────────────────────────────────────────
 
-def fetch_all_concerts(window_days: int) -> "tuple[list[Concert], date]":
+def fetch_all_concerts(
+    window_days: int,
+    cache: 'Optional[Cache]' = None,
+) -> list[Concert]:
     today = date.today()
     end_date = today + timedelta(days=window_days)
     concerts: list[Concert] = []
@@ -222,7 +228,28 @@ def fetch_all_concerts(window_days: int) -> "tuple[list[Concert], date]":
         gcal = GoogleCalendarClient(config.google_calendar_ics_url)
         concerts.extend(gcal.get_concerts(today, end_date))
 
-    return concerts, today
+    # Manual concerts — clean up past entries on load
+    if cache is not None:
+        entries = cache.get_manual_concerts()
+        expired_ids = []
+        for entry in entries:
+            event_date = date.fromisoformat(entry['event_date'])
+            if event_date < today:
+                expired_ids.append(entry['id'])
+                continue
+            if event_date <= end_date:
+                concerts.append(Concert(
+                    event_name=entry['event_name'] or entry['artist_name'],
+                    artist_name=entry['artist_name'],
+                    event_date=event_date,
+                    venue=entry['venue'] or 'Manual entry',
+                    source='manual',
+                ))
+        if expired_ids:
+            removed = cache.remove_manual_concerts(expired_ids)
+            logger.info(f'Removed {removed} past manual concert(s)')
+
+    return concerts
 
 
 # ── Status ───────────────────────────────────────────────────────────────────
@@ -234,10 +261,11 @@ def cmd_status() -> None:
         print(f'Configuration incomplete:\n{e}')
         return
 
-    concerts, today = fetch_all_concerts(config.concert_window_days)
+    cache = Cache()
+    today = date.today()
+    concerts = fetch_all_concerts(config.concert_window_days, cache)
 
     if config.ticketmaster_api_key:
-        cache = Cache()
         tm = TicketmasterClient(config.ticketmaster_api_key, cache)
         concerts = enrich_with_openers(concerts, tm)
 
@@ -271,7 +299,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     today = date.today()
 
     # 1. Fetch concerts from all configured calendar sources
-    concerts, today = fetch_all_concerts(config.concert_window_days)
+    concerts = fetch_all_concerts(config.concert_window_days, cache)
     if not concerts:
         logger.warning('No concerts found. Make sure your calendar is configured and contains concert events.')
         return
@@ -327,7 +355,6 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
         return
 
     # 5. Compute weights and allocate duration budgets
-    _ASSUMED_AVG_TRACK_MS = 210_000  # 3.5 min average track length
     weights = compute_artist_weights({a_id: a.concerts for a_id, a in artists.items()}, today)
     slots = allocate_slots(
         weights,
@@ -357,6 +384,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
         play_counts = cache.get_play_counts(artist_id)
         artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else None
         artist.lastfm_scores  = lastfm_client.get_popularity_scores(artist.name) if lastfm_client else None
+        tracks = deduplicate_tracks(tracks, artist.lastfm_scores)
         artist.selected_tracks = select_tracks_for_artist(
             tracks=tracks,
             duration_budget_ms=duration_budget_ms,
@@ -402,7 +430,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
             for t in artist.selected_tracks:
                 release = (t.release_date or '?')[:4]
                 dur = t.duration_ms // 1000
-                name_key = t.name.lower().strip()
+                name_key = normalize_track_name(t.name)
                 freq = sl_scores.get(name_key)
                 pop  = lf_scores.get(name_key)
                 sl_str = f'{freq:.0%}' if freq is not None else '—'
@@ -428,9 +456,8 @@ def _try_ip_geolocation() -> 'tuple[str, str] | None':
     Attempt to resolve the current location via IP geolocation.
     Returns (latlong, city_label) on success, None on any failure.
     """
-    import requests as _req
     try:
-        resp = _req.get('http://ip-api.com/json', timeout=5)
+        resp = requests.get('http://ip-api.com/json', timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if data.get('status') == 'success':
@@ -507,25 +534,6 @@ def resolve_discovery_location(cache: 'Cache') -> 'tuple[str | None, str | None]
 
 # ── Discovery playlist build ──────────────────────────────────────────────────
 
-def resolve_calendar_ids(
-    calendar_artist_names: list,
-    sp_raw: object,
-    cache: object,
-) -> set:
-    """
-    Resolve a list of artist names (from calendar events) to Spotify artist IDs.
-
-    Names that cannot be resolved are silently skipped.  The returned set is
-    used to filter discovery candidates so already-booked artists are excluded.
-    """
-    ids: set = set()
-    for name in calendar_artist_names:
-        cid = resolve_artist(name, sp_raw, cache)
-        if cid:
-            ids.add(cid)
-    return ids
-
-
 _DESCRIPTION_MAX = 300
 
 
@@ -547,29 +555,29 @@ def _build_discovery_description(artists: dict, all_concerts: list) -> str:
 
     selected_names: set = {a.name for a in artists.values()}
 
-    # Group the full TM list by (date, venue) to reconstruct bills
-    bills: dict = defaultdict(lambda: {'headliner': None, 'selected_openers': [], '_seen_openers': set()})
+    # Group the full TM list by (date, venue) to reconstruct bills.
+    # headliners: one name per key; openers: set to naturally deduplicate.
+    headliners: dict = {}
+    openers: dict = defaultdict(set)
     for concert in all_concerts:
         key = (concert.event_date, concert.venue)
         if not concert.is_opener:
-            bills[key]['headliner'] = concert.artist_name
+            headliners[key] = concert.artist_name
         elif concert.artist_name in selected_names:
-            if concert.artist_name not in bills[key]['_seen_openers']:
-                bills[key]['selected_openers'].append(concert.artist_name)
-                bills[key]['_seen_openers'].add(concert.artist_name)
+            openers[key].add(concert.artist_name)
 
     lines = []
-    for (event_date, venue), bill in sorted(bills.items()):
-        headliner = bill['headliner']
-        openers   = bill['selected_openers']
+    for key in sorted(headliners):
+        event_date, venue = key
+        headliner = headliners[key]
+        selected_openers = sorted(openers[key])
 
-        headliner_selected = headliner in selected_names if headliner else False
-        if not headliner_selected and not openers:
+        if headliner not in selected_names and not selected_openers:
             continue  # no selected artist from this event
 
         date_str = event_date.strftime('%m/%d')
-        if openers:
-            opener_str = ', '.join(openers)
+        if selected_openers:
+            opener_str = ', '.join(selected_openers)
             lines.append(f'{date_str} {headliner} (Openers: {opener_str}) at {venue}')
         else:
             lines.append(f'{date_str} {headliner} at {venue}')
@@ -578,6 +586,83 @@ def _build_discovery_description(artists: dict, all_concerts: list) -> str:
     if len(description) > _DESCRIPTION_MAX:
         description = description[:_DESCRIPTION_MAX - 1] + '…'
     return description
+
+
+def cmd_list_concerts() -> None:
+    entries = Cache().get_manual_concerts()
+    if not entries:
+        print('No manual concerts saved.')
+        return
+    today = date.today()
+    print(f'\nManual concerts ({len(entries)}):')
+    for e in entries:
+        days = (date.fromisoformat(e['event_date']) - today).days
+        venue_str = f' @ {e["venue"]}' if e['venue'] else ''
+        print(f'  [{e["id"]}] {e["artist_name"]}{venue_str}  —  {e["event_date"]}  ({days}d away)')
+    print()
+
+
+def cmd_add_concert() -> None:
+    print('\nAdd a manual concert\n')
+
+    artist_name = input('Artist name: ').strip()
+    if not artist_name:
+        print('Artist name is required.')
+        return
+
+    while True:
+        date_str = input('Date (YYYY-MM-DD): ').strip()
+        try:
+            event_date = date.fromisoformat(date_str)
+        except ValueError:
+            print('Invalid date — use YYYY-MM-DD format.')
+            continue
+        if event_date < date.today():
+            print('That date has already passed.')
+            continue
+        break
+
+    venue      = input('Venue (optional, press Enter to skip): ').strip()
+    event_name = input('Event name (optional, press Enter to use artist name): ').strip()
+
+    concert_id = Cache().add_manual_concert(artist_name, date_str, venue, event_name)
+    venue_str  = f' @ {venue}' if venue else ''
+    print(f'\nAdded: {artist_name}{venue_str} on {date_str}  (ID: {concert_id})')
+
+
+def cmd_remove_concert() -> None:
+    cache   = Cache()
+    entries = cache.get_manual_concerts()
+    if not entries:
+        print('No manual concerts saved.')
+        return
+
+    today = date.today()
+    print('\nManual concerts:')
+    for e in entries:
+        days = (date.fromisoformat(e['event_date']) - today).days
+        venue_str = f' @ {e["venue"]}' if e['venue'] else ''
+        print(f'  [{e["id"]}] {e["artist_name"]}{venue_str}  —  {e["event_date"]}  ({days}d away)')
+
+    choice = input('\nEnter ID to remove (or q to cancel): ').strip().lower()
+    if not choice or choice == 'q':
+        print('Cancelled.')
+        return
+
+    try:
+        concert_id = int(choice)
+    except ValueError:
+        print('Invalid ID.')
+        return
+
+    entry = next((e for e in entries if e['id'] == concert_id), None)
+    if not entry:
+        print(f'No concert with ID {concert_id}.')
+        return
+
+    cache.remove_manual_concert(concert_id)
+    venue_str = f' @ {entry["venue"]}' if entry['venue'] else ''
+    print(f'Removed: {entry["artist_name"]}{venue_str} on {entry["event_date"]}')
 
 
 def cmd_list_blocked() -> None:
@@ -687,12 +772,12 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     logger.info(f'Found {len(concerts)} artist slots across local events')
 
-    # 3. Collect calendar artist names to exclude (already have tickets)
+    # 4. Collect calendar artist names to exclude (already have tickets)
     #     fetch_all_concerts returns empty if no calendar is configured.
     #     enrich_with_openers adds opening acts so they're excluded too —
     #     if you already have a ticket, you'll see the whole bill.
     logger.info('Fetching calendar events to identify already-booked artists…')
-    cal_concerts, _ = fetch_all_concerts(config.discovery_window_days)
+    cal_concerts = fetch_all_concerts(config.discovery_window_days, cache)
     if cal_concerts:
         cal_concerts = enrich_with_openers(cal_concerts, tm)
     seen_cal: set[str] = set()
@@ -748,9 +833,12 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
 
-    # 8. Remove artists the user already has tickets to (calendar sources)
+    # 9. Remove artists the user already has tickets to (calendar sources)
     if calendar_artist_names:
-        calendar_ids = resolve_calendar_ids(calendar_artist_names, sp_raw, cache)
+        calendar_ids = {
+            cid for name in calendar_artist_names
+            if (cid := resolve_artist(name, sp_raw, cache))
+        }
         before = len(artists)
         artists = {aid: a for aid, a in artists.items() if aid not in calendar_ids}
         removed = before - len(artists)
@@ -760,7 +848,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             print('All nearby artists are already in your concert calendar — nothing new to discover!')
             return
 
-    # 8b. Filter blocked artists
+    # 10. Filter blocked artists
     blocked_ids = cache.get_blocked_artists()
     if blocked_ids:
         before = len(artists)
@@ -774,7 +862,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     candidate_ids = list(artists.keys())
 
-    # 9. Compute artist familiarity
+    # 11. Compute artist familiarity
     logger.info('Computing artist familiarity…')
     top_scores  = sp.get_artist_top_scores(cache)
     play_counts = cache.get_artist_play_counts()
@@ -783,7 +871,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     taste_profile    = {v.name.lower(): v.score for v in top_scores.values()}
     familiarity = compute_artist_familiarity_scores(candidate_ids, top_score_values, play_counts)
 
-    # 10. Fetch Last.fm signals (optional — skipped if LASTFM_API_KEY not set)
+    # 12. Fetch Last.fm signals (optional — skipped if LASTFM_API_KEY not set)
     raw_listeners: dict[str, int] = {}
     similarity_by_id: dict[str, float] = {}
     if config.lastfm_api_key:
@@ -806,7 +894,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             for aid in candidate_ids
         }
 
-    # 11. Score + select artists (floor + cap)
+    # 13. Score + select artists (floor + cap)
     selected_ids, enjoyment_scores = select_discovery_artists(
         candidate_ids=candidate_ids,
         familiarity_scores=familiarity,
@@ -822,7 +910,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     artists = {aid: artists[aid] for aid in selected_ids}
 
-    # 12. Allocate duration budgets weighted by enjoyment × proximity
+    # 14. Allocate duration budgets weighted by enjoyment × proximity
     weights = compute_discovery_weights(artists, enjoyment_scores, today)
     slots   = allocate_slots(
         weights,
@@ -830,11 +918,11 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         min_duration_ms=0,   # every selected artist gets a slot; select_tracks rounds up to 1 track
     )
 
-    # 13. Get track-level familiarity for scoring
+    # 15. Get track-level familiarity for scoring
     logger.info('Fetching Spotify listening history…')
     spotify_familiarity = sp.get_user_familiarity(cache)
 
-    # 14. Select tracks per artist (identical pipeline to prep playlist)
+    # 16. Select tracks per artist (identical pipeline to prep playlist)
     setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
         if config.setlist_fm_api_key else None
     lastfm_track_client = LastFmClient(config.lastfm_api_key, cache) \
@@ -852,6 +940,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         play_counts_artist = cache.get_play_counts(artist_id)
         artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else None
         artist.lastfm_scores  = lastfm_track_client.get_popularity_scores(artist.name) if lastfm_track_client else None
+        tracks = deduplicate_tracks(tracks, artist.lastfm_scores)
         artist.selected_tracks = select_tracks_for_artist(
             tracks=tracks,
             duration_budget_ms=duration_budget_ms,
@@ -869,7 +958,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             f'concert in {nearest}d)'
         )
 
-    # 15. Flatten to ordered track list (highest-enjoyment artist first)
+    # 17. Flatten to ordered track list (highest-enjoyment artist first)
     all_tracks: list[Track] = []
     for artist_id in sorted(slots, key=lambda aid: -enjoyment_scores.get(aid, 0.0)):
         all_tracks.extend(artists[artist_id].selected_tracks)
@@ -878,7 +967,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     total      = len(track_uris)
     total_min  = sum(t.duration_ms for t in all_tracks) // 60_000
 
-    # 16. Dry run: print summary and exit
+    # 18. Dry run: print summary and exit
     if dry_run:
         artists_with_tracks = sum(1 for a in artists.values() if a.selected_tracks)
         print(f'\n=== DISCOVERY DRY RUN — {total} tracks (~{total_min}m) from {artists_with_tracks} artists ===\n')
@@ -896,7 +985,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             for t in artist.selected_tracks:
                 release = (t.release_date or '?')[:4]
                 dur     = t.duration_ms // 1000
-                name_key = t.name.lower().strip()
+                name_key = normalize_track_name(t.name)
                 freq = sl_scores.get(name_key)
                 pop  = lf_scores.get(name_key)
                 sl_str = f'{freq:.0%}' if freq is not None else '—'
@@ -905,7 +994,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             print()
         return
 
-    # 17. Update Spotify discovery playlist
+    # 19. Update Spotify discovery playlist
     playlist_id = sp.get_or_create_playlist(
         config.discovery_playlist_name,
         config.discovery_playlist_id,
@@ -961,6 +1050,9 @@ def main() -> None:
     group.add_argument('--block-artist',   metavar='NAME', help='Block an artist from future discovery runs')
     group.add_argument('--unblock-artist', metavar='NAME', help='Remove an artist from the discovery blocklist')
     group.add_argument('--list-blocked',   action='store_true', help='List artists blocked from discovery')
+    group.add_argument('--add-concert',    action='store_true', help='Add a manual concert')
+    group.add_argument('--remove-concert', action='store_true', help='Remove a manual concert')
+    group.add_argument('--list-concerts',  action='store_true', help='List manually added concerts')
     parser.add_argument('--verbose', '-v', action='store_true', help='Debug logging')
     parser.add_argument('--cron', action='store_true', help='Mark this run as cron-triggered (used in run log)')
 
@@ -1007,6 +1099,12 @@ def main() -> None:
         cmd_unblock_artist(args.unblock_artist)
     elif args.list_blocked:
         cmd_list_blocked()
+    elif args.add_concert:
+        cmd_add_concert()
+    elif args.remove_concert:
+        cmd_remove_concert()
+    elif args.list_concerts:
+        cmd_list_concerts()
 
 
 if __name__ == '__main__':

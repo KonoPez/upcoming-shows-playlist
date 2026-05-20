@@ -18,6 +18,7 @@ without exceeding the target size.
 
 import math
 import logging
+from collections import defaultdict
 from datetime import date
 
 from sources.models import Concert
@@ -53,17 +54,47 @@ def compute_artist_weights(
       An artist can be a headliner at one show and an opener at another; the
       bonus is applied per concert, not per artist.
 
+    Manual-source concerts use event-level normalization: all artists sharing
+    the same (event_date, event_name) collectively contribute one headliner's
+    worth of proximity weight to the pool, split proportionally by role. This
+    prevents a festival with many manually-added artists from diluting the
+    weight pool and crowding out calendar events at other dates.
+
     Returns: {spotify_artist_id: raw_weight}
     """
-    weights = {}
+    weights: dict[str, float] = defaultdict(float)
+
+    # Calendar and Ticketmaster concerts: original per-concert weight logic
     for artist_id, concerts in artist_concerts.items():
-        total = sum(
-            concert_weight(c.days_until(today)) * (1 if c.is_opener else HEADLINER_BONUS)
-            for c in concerts
-        )
-        if total > 0.0:
-            weights[artist_id] = total
-    return weights
+        for c in concerts:
+            if c.source != 'manual':
+                w = concert_weight(c.days_until(today)) * (1 if c.is_opener else HEADLINER_BONUS)
+                weights[artist_id] += w
+
+    # Manual concerts: normalize so each (date, event_name) group contributes
+    # exactly one headliner's worth of weight regardless of how many artists it has.
+    manual_events: dict[tuple, list[tuple[str, Concert]]] = defaultdict(list)
+    for artist_id, concerts in artist_concerts.items():
+        for c in concerts:
+            if c.source == 'manual':
+                manual_events[(c.event_date, c.event_name)].append((artist_id, c))
+
+    for (event_date, _), appearances in manual_events.items():
+        days = (event_date - today).days
+        ev_weight = concert_weight(days)
+        if ev_weight <= 0:
+            continue
+
+        event_total = ev_weight * HEADLINER_BONUS
+        raw_shares = {
+            aid: ev_weight * (HEADLINER_BONUS if not c.is_opener else 1.0)
+            for aid, c in appearances
+        }
+        total_raw = sum(raw_shares.values())
+        for aid, raw in raw_shares.items():
+            weights[aid] += (raw / total_raw) * event_total
+
+    return {aid: w for aid, w in weights.items() if w > 0}
 
 
 def allocate_slots(

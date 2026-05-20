@@ -19,7 +19,6 @@ from playlist_logic.scoring import (
     LASTFM_W,
     RECENCY_WINDOW_DAYS,
     _familiarity,
-    _interleave_albums,
     _parse_release_date,
     _recency_score,
     score_track,
@@ -347,7 +346,7 @@ class TestSelectTracksForArtist:
         assert ids == ['t5', 't4', 't3']   # highest setlist frequency first
 
 
-# ── _interleave_albums ────────────────────────────────────────────────────────
+# ── select_tracks_for_artist — album cap ─────────────────────────────────────
 
 def _make_track(tid: str, album_id: str, release_date: str) -> Track:
     return Track(
@@ -359,45 +358,6 @@ def _make_track(tid: str, album_id: str, release_date: str) -> Track:
         album_name=f'Album {album_id}',
         duration_ms=_TRACK_MS,
     )
-
-
-class TestInterleaveAlbums:
-    def test_single_album_unchanged(self):
-        tracks = [_make_track(f't{i}', 'a1', '2024-01-01') for i in range(4)]
-        assert _interleave_albums(tracks) == tracks
-
-    def test_empty_unchanged(self):
-        assert _interleave_albums([]) == []
-
-    def test_two_albums_alternate(self):
-        a_tracks = [_make_track(f'a{i}', 'albumA', '2024-01-01') for i in range(3)]
-        b_tracks = [_make_track(f'b{i}', 'albumB', '2023-01-01') for i in range(3)]
-        result = _interleave_albums(a_tracks + b_tracks)
-        album_ids = [t.album_id for t in result]
-        for i in range(len(album_ids) - 1):
-            assert album_ids[i] != album_ids[i + 1]
-
-    def test_newer_album_leads(self):
-        old = [_make_track('o1', 'old', '2020-01-01')]
-        new = [_make_track('n1', 'new', '2024-01-01')]
-        result = _interleave_albums(old + new)
-        assert result[0].album_id == 'new'
-
-    def test_unequal_album_sizes_minimizes_consecutive_pairs(self):
-        # 3 from A, 1 from B — some consecutive pairs are unavoidable (best is [A,B,A,A]),
-        # but B should be interleaved early rather than left at the end.
-        a_tracks = [_make_track(f'a{i}', 'albumA', '2024-01-01') for i in range(3)]
-        b_tracks = [_make_track('b0', 'albumB', '2023-01-01')]
-        result = _interleave_albums(a_tracks + b_tracks)
-        album_ids = [t.album_id for t in result]
-        consecutive_pairs = sum(
-            1 for i in range(len(album_ids) - 1) if album_ids[i] == album_ids[i + 1]
-        )
-        # Theoretical minimum for a 3:1 split is 1 — verify we achieve it
-        assert consecutive_pairs <= 1
-
-
-# ── select_tracks_for_artist — album cap + interleaving ───────────────────────
 
 class TestSelectTracksAlbumCap:
     TODAY = date(2024, 1, 1)
@@ -415,18 +375,6 @@ class TestSelectTracksAlbumCap:
         assert len(selected) == 6
         assert sum(1 for t in selected if t.album_id == 'albumA') == 4
         assert sum(1 for t in selected if t.album_id == 'albumB') == 2
-
-    def test_no_consecutive_same_album(self):
-        # Tracks across two albums — output must alternate
-        tracks_a = [_make_track(f'a{i}', 'albumA', '2024-01-01')
-                    for i in range(4)]
-        tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01')
-                    for i in range(4)]
-        selected = select_tracks_for_artist(tracks_a + tracks_b, 8 * _TRACK_MS, {}, {}, self.TODAY)
-        album_ids = [t.album_id for t in selected]
-        for i in range(len(album_ids) - 1):
-            assert album_ids[i] != album_ids[i + 1], \
-                f'Consecutive same album at positions {i},{i+1}: {album_ids}'
 
     def test_cap_zero_signals_scenario(self):
         # No setlist or Last.fm data — recency is the only differentiator.

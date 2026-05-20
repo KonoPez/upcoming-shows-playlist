@@ -66,7 +66,9 @@ class Config:
     # Playlist tuning
     concert_window_days: int = 90
     playlist_target_duration_minutes: int = 120
-    min_tracks_per_artist: int = 2
+    min_tracks_per_artist: int = field(
+        default_factory=lambda: int(_env_str('MIN_TRACKS_PER_ARTIST', '2'))
+    )
 
     @property
     def spotify_token_path(self) -> str:

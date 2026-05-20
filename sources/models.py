@@ -1,6 +1,27 @@
+import re
 from dataclasses import dataclass, asdict, field
 from datetime import date
 from typing import Optional
+
+_VARIANT_KEYWORDS = r'(?:live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)'
+
+
+def normalize_track_name(name: str) -> str:
+    """
+    Strip variant suffixes and lowercase a track name for use as a lookup key.
+
+    "Dancers - Live at Bush Hall" → "dancers"
+    "Song (Live at Glastonbury)"  → "song"
+    "Song (Acoustic Version)"     → "song"
+    "Concorde"                    → "concorde"
+
+    Used both when grouping tracks by song identity (deduplication) and when
+    looking up setlist/Last.fm scores, so that live-only releases match the
+    canonical song name used by those external services.
+    """
+    stripped = re.sub(rf'\s*\(.*\b{_VARIANT_KEYWORDS}\b.*\).*$', '', name, flags=re.IGNORECASE)
+    stripped = re.sub(rf'\s*[-–]\s*{_VARIANT_KEYWORDS}\b.*$', '', stripped, flags=re.IGNORECASE)
+    return stripped.strip().lower()
 
 
 @dataclass

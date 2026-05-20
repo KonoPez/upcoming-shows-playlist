@@ -5,12 +5,13 @@ High-level Spotify operations: playlist management, user history, discography fe
 import logging
 import re
 import time
+from collections import defaultdict
 from typing import NamedTuple, Optional
 
 import spotipy
 
 from cache import Cache
-from sources.models import Track
+from sources.models import Track, normalize_track_name
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,79 @@ ARTIST_TRACKS_TTL = 30 * 24 * 3600   # 30 days — discographies don't change fa
 FAMILIARITY_TTL = 6 * 3600            # 6 hours — top tracks don't shift meaningfully intra-day
 RECENTLY_PLAYED_TTL = 5 * 60          # 5 min — deduplicates the two callers within a single run
 API_DELAY = 0.1                        # 100 ms between calls
-MAX_ALBUMS_PER_ARTIST = 15            # most recent studio albums + singles
+MAX_ALBUMS_PER_ARTIST = 25            # most recent studio albums + singles
+
+# Album names that indicate the entire album is a non-studio recording.
+_VARIANT_ALBUM_RE = re.compile(
+    r'\b(live\s+(at|from|in)\b'
+    r'|unplugged'
+    r'|acoustic\s+sessions?'
+    r'|demos?'
+    r'|remixed|(?:the\s+)?remixes?)\b'
+    r'|\(live\)',
+    re.IGNORECASE,
+)
+
+# Track name patterns that mark a variant recording:
+#   Parenthetical: "Song (Live)", "Song (X Remix)", "Song (Acoustic Version)"
+#   Dash suffix:   "Song - Acoustic", "Song - Demo", "Song - Live Version"
+# Parenthetical form requires parens so "Live Wire" or "Acoustic" as a title is unaffected.
+# Dash form requires the keyword to start immediately after the dash so "Song - A Demo
+# of Courage" would not match, but in practice that pattern doesn't occur on Spotify.
+_VARIANT_TRACK_RE = re.compile(
+    r'\(.*\b(live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)\b.*\)'
+    r'|\s+[-–]\s+(live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)\b',
+    re.IGNORECASE,
+)
+
+
+
+def deduplicate_tracks(
+    tracks: list[Track],
+    lastfm_scores: Optional[dict] = None,
+) -> list[Track]:
+    """
+    Group tracks by base song name and return one representative per group.
+
+    Within each group the representative is chosen by priority:
+      1. Exactly one non-variant exists → use it.
+      2. Multiple candidates (all non-variants, or all variants when no studio
+         version exists) → pick the one with the highest Last.fm score.
+      3. Last.fm unavailable or all tied → shortest track title.
+      4. Still tied → first in the list (albums are newest-first, so this
+         naturally favours the more recent pressing).
+    """
+    groups: dict[str, list[Track]] = defaultdict(list)
+    for track in tracks:
+        groups[normalize_track_name(track.name)].append(track)
+
+    result: list[Track] = []
+    for group in groups.values():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+
+        non_variants = [
+            t for t in group
+            if not bool(_VARIANT_ALBUM_RE.search(t.album_name) or _VARIANT_TRACK_RE.search(t.name))
+        ]
+
+        if len(non_variants) == 1:
+            result.append(non_variants[0])
+            continue
+
+        # Prefer non-variants when multiple exist; fall back to all if none exist.
+        candidates = non_variants if non_variants else group
+
+        if lastfm_scores and len(candidates) > 1:
+            best_score = max(lastfm_scores.get(t.name.lower().strip(), 0.0) for t in candidates)
+            if best_score > 0.0:
+                result.append(max(candidates, key=lambda t: lastfm_scores.get(t.name.lower().strip(), 0.0)))
+                continue
+
+        result.append(min(candidates, key=lambda t: len(t.name)))
+
+    return result
 
 
 class ArtistTopScore(NamedTuple):
@@ -269,34 +342,11 @@ class SpotifyClient:
             cache.set(cache_key, [t.to_dict() for t in tracks], ARTIST_TRACKS_TTL)
         return tracks
 
-    # Album names that indicate the entire album is a non-studio recording.
-    _VARIANT_ALBUM_RE = re.compile(
-        r'\b(live\s+(at|from|in)\b'
-        r'|unplugged'
-        r'|acoustic\s+sessions?'
-        r'|demos?'
-        r'|remixed|(?:the\s+)?remixes?)\b'
-        r'|\(live\)',
-        re.IGNORECASE,
-    )
-
-    # Track name patterns that mark a variant recording:
-    #   Parenthetical: "Song (Live)", "Song (X Remix)", "Song (Acoustic Version)"
-    #   Dash suffix:   "Song - Acoustic", "Song - Demo", "Song - Live Version"
-    # Parenthetical form requires parens so "Live Wire" or "Acoustic" as a title is unaffected.
-    # Dash form requires the keyword to start immediately after the dash so "Song - A Demo
-    # of Courage" would not match, but in practice that pattern doesn't occur on Spotify.
-    _VARIANT_TRACK_RE = re.compile(
-        r'\(.*\b(live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)\b.*\)'
-        r'|\s+[-–]\s+(live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)\b',
-        re.IGNORECASE,
-    )
-
     def _is_variant_recording(self, track_name: str, album_name: str) -> bool:
         """Return True if the track is a live, acoustic, remix, instrumental, or demo version."""
         return bool(
-            self._VARIANT_ALBUM_RE.search(album_name)
-            or self._VARIANT_TRACK_RE.search(track_name)
+            _VARIANT_ALBUM_RE.search(album_name)
+            or _VARIANT_TRACK_RE.search(track_name)
         )
 
     def _fetch_artist_tracks(self, artist_id: str) -> list[Track]:
@@ -304,8 +354,11 @@ class SpotifyClient:
         if not albums:
             return []
 
-        # Collect tracks, deduplicating by normalised name (keeps newest version)
-        by_name: dict[str, Track] = {}
+        # Collect studio and variant tracks separately, each deduped by base name
+        # keeping the newest version within its category.  Both are stored so
+        # deduplicate_tracks() can later pick the best representative per song.
+        studio_by_name: dict[str, Track] = {}   # base_name → newest non-variant
+        variant_by_name: dict[str, Track] = {}  # base_name → newest variant
 
         for album in albums:
             album_id = album['id']
@@ -319,18 +372,15 @@ class SpotifyClient:
                     continue
 
                 track_name = track.get('name', '')
-                if self._is_variant_recording(track_name, album_name):
-                    logger.debug(f'Skipping variant recording: "{track_name}" ({album_name})')
-                    continue
+                is_variant = self._is_variant_recording(track_name, album_name)
+                base = normalize_track_name(track_name)
+                target = variant_by_name if is_variant else studio_by_name
 
-                name_key = track_name.lower().strip()
-                existing = by_name.get(name_key)
-
-                # Keep the version from the most recently released album
+                existing = target.get(base)
                 if existing and existing.release_date >= release_date:
                     continue
 
-                by_name[name_key] = Track(
+                target[base] = Track(
                     id=tid,
                     name=track_name,
                     duration_ms=track.get('duration_ms', 0),
@@ -340,12 +390,13 @@ class SpotifyClient:
                     release_date_precision=release_date_precision,
                 )
 
-        if not by_name:
+        all_tracks = list(studio_by_name.values()) + list(variant_by_name.values())
+        if not all_tracks:
             return []
 
-        all_tracks = list(by_name.values())
         logger.debug(
-            f'Artist {artist_id}: {len(all_tracks)} tracks from {len(albums)} albums'
+            f'Artist {artist_id}: {len(studio_by_name)} studio + '
+            f'{len(variant_by_name)} variant tracks from {len(albums)} albums'
         )
         return all_tracks
 

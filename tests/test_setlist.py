@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sources.models import Track
-from sources.setlist import SetlistClient, _normalize_title, _parse_setlist_date, MAX_SHOWS
+from sources.setlist import SetlistClient, _parse_setlist_date, MAX_SHOWS
 from playlist_logic.scoring import SETLIST_W, RECENCY_W, NOVELTY_W, score_track, select_tracks_for_artist
 
 
@@ -40,16 +40,6 @@ def _make_track(name: str, album_id: str = 'a1') -> Track:
         release_date_precision='day',
         duration_ms=200_000,
     )
-
-
-# ── _normalize_title ──────────────────────────────────────────────────────────
-
-class TestNormalizeTitle:
-    def test_lowercases(self):
-        assert _normalize_title('From The Start') == 'from the start'
-
-    def test_strips_whitespace(self):
-        assert _normalize_title('  hello  ') == 'hello'
 
 
 # ── _parse_setlist_date ───────────────────────────────────────────────────────

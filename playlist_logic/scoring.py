@@ -6,18 +6,18 @@ the sum of weights for signals that are actually available. This means the
 relative importance of each signal is preserved regardless of which external
 APIs are configured, and no separate fallback weight sets are needed.
 
-  SETLIST (0.45): how often the artist plays this track live (setlist.fm).
+  SETLIST (0.55): how often the artist plays this track live (setlist.fm).
     Frequency = appearances / shows sampled. Old staples that are played at
     every show compete fairly against new material.
 
-  LASTFM  (0.25): global popularity from Last.fm play counts. Log-normalised
+  LASTFM  (0.10): global popularity from Last.fm play counts. Log-normalised
     so a track with half the plays of the #1 track scores ~0.85, not 0.5.
 
-  RECENCY (0.15): linear decay from 1.0 at release to 0.0 at 18 months.
+  RECENCY (0.10): linear decay from 1.0 at release to 0.0 at 18 months.
     New tour material typically enters setlists quickly, so recency remains
     a useful secondary signal even when live data is available.
 
-  NOVELTY (0.15): inverse of familiarity — surfaces tracks the user hasn't
+  NOVELTY (0.25): inverse of familiarity — surfaces tracks the user hasn't
     heard yet. Familiarity combines Spotify top-tracks API signal and local
     play-count history, taking the max.
 
@@ -29,12 +29,12 @@ import logging
 from datetime import date
 from typing import Optional
 
-from sources.models import Track
+from sources.models import Track, normalize_track_name
 
 logger = logging.getLogger(__name__)
 
-LASTFM_W  = 0.20
-SETLIST_W = 0.45
+LASTFM_W  = 0.10
+SETLIST_W = 0.55
 RECENCY_W = 0.10
 NOVELTY_W = 0.25
 
@@ -94,7 +94,7 @@ def score_track(
     recency = _recency_score(release_date, today)
     novelty = 1.0 - _familiarity(track.id, spotify_familiarity, play_counts)
 
-    name_key = track.name.lower().strip()
+    name_key   = normalize_track_name(track.name)
     freq       = setlist_scores.get(name_key, 0.0) if setlist_scores else 0.0
     popularity = lastfm_scores.get(name_key, 0.0)  if lastfm_scores  else 0.0
 
@@ -108,36 +108,6 @@ def score_track(
         + RECENCY_W * recency
         + NOVELTY_W * novelty
     ) / total_w
-
-
-def _interleave_albums(tracks: "list[Track]") -> "list[Track]":
-    """
-    Reorder tracks so no two consecutive tracks share the same album.
-    Album groups are sorted newest-first by release date, then round-robined.
-    Returns tracks unchanged if they all belong to a single album.
-    """
-    if not tracks:
-        return tracks
-
-    by_album: dict[str, list[Track]] = {}
-    for t in tracks:
-        by_album.setdefault(t.album_id, []).append(t)
-
-    if len(by_album) <= 1:
-        return tracks
-
-    # Sort album groups newest-first so the interleaved order leads with new material
-    def _album_date(items: "list[Track]") -> str:
-        return max(t.release_date for t in items)
-
-    groups = sorted(by_album.values(), key=_album_date, reverse=True)
-
-    result = []
-    while any(groups):
-        for g in groups:
-            if g:
-                result.append(g.pop(0))
-    return result
 
 
 def select_tracks_for_artist(
@@ -157,8 +127,7 @@ def select_tracks_for_artist(
     Applies a per-album cap (max_per_album) so a single album cannot claim
     every slot. Tracks without an album_id are uncapped.
 
-    The selected tracks are interleaved across albums (newest album first,
-    round-robin) so no two consecutive tracks come from the same album.
+    Tracks are returned in descending score order.
     """
     if not tracks or duration_budget_ms == 0:
         return []
@@ -182,4 +151,4 @@ def select_tracks_for_artist(
             if t.album_id:
                 album_counts[t.album_id] = album_counts.get(t.album_id, 0) + 1
 
-    return _interleave_albums(selected)
+    return selected

@@ -27,11 +27,6 @@ MAX_SHOWS = 10                  # shows to sample per artist
 MAX_AGE_DAYS = 365              # ignore shows older than 1 year
 
 
-def _normalize_title(name: str) -> str:
-    """Lowercase + strip for fuzzy matching against Spotify track names."""
-    return name.lower().strip()
-
-
 def _parse_setlist_date(date_str: str) -> Optional[date]:
     """Parse setlist.fm date format: dd-MM-yyyy."""
     try:
@@ -110,7 +105,7 @@ class SetlistClient:
 
             shows_analyzed += 1
             for name in songs:
-                key = _normalize_title(name)
+                key = name.lower().strip()
                 if key:
                     counts[key] = counts.get(key, 0) + 1
 

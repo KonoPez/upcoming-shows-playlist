@@ -146,3 +146,65 @@ class TestDiscoveryBlocklist:
         cache.add_blocked_artist('id1', 'Artist One')
         cache.clear_all()
         assert cache.get_blocked_artists() == {'id1': 'Artist One'}
+
+
+# ── Manual concerts ───────────────────────────────────────────────────────────
+
+class TestManualConcerts:
+    def test_empty_returns_empty_list(self, cache):
+        assert cache.get_manual_concerts() == []
+
+    def test_add_and_retrieve(self, cache):
+        cache.add_manual_concert('Radiohead', '2026-08-01', 'Madison Square Garden')
+        entries = cache.get_manual_concerts()
+        assert len(entries) == 1
+        assert entries[0]['artist_name'] == 'Radiohead'
+        assert entries[0]['event_date']  == '2026-08-01'
+        assert entries[0]['venue']       == 'Madison Square Garden'
+
+    def test_add_returns_incrementing_ids(self, cache):
+        id1 = cache.add_manual_concert('Artist A', '2026-08-01')
+        id2 = cache.add_manual_concert('Artist B', '2026-08-02')
+        assert id2 > id1
+
+    def test_optional_fields_default_to_empty_string(self, cache):
+        cache.add_manual_concert('Artist A', '2026-08-01')
+        entry = cache.get_manual_concerts()[0]
+        assert entry['venue']      == ''
+        assert entry['event_name'] == ''
+
+    def test_ordered_by_date(self, cache):
+        cache.add_manual_concert('Artist B', '2026-09-01')
+        cache.add_manual_concert('Artist A', '2026-07-01')
+        cache.add_manual_concert('Artist C', '2026-08-01')
+        dates = [e['event_date'] for e in cache.get_manual_concerts()]
+        assert dates == sorted(dates)
+
+    def test_remove_existing(self, cache):
+        concert_id = cache.add_manual_concert('Artist A', '2026-08-01')
+        removed = cache.remove_manual_concert(concert_id)
+        assert removed is True
+        assert cache.get_manual_concerts() == []
+
+    def test_remove_nonexistent_returns_false(self, cache):
+        assert cache.remove_manual_concert(9999) is False
+
+    def test_remove_batch(self, cache):
+        id1 = cache.add_manual_concert('Artist A', '2026-08-01')
+        id2 = cache.add_manual_concert('Artist B', '2026-08-02')
+        cache.add_manual_concert('Artist C', '2026-08-03')
+        deleted = cache.remove_manual_concerts([id1, id2])
+        assert deleted == 2
+        remaining = cache.get_manual_concerts()
+        assert len(remaining) == 1
+        assert remaining[0]['artist_name'] == 'Artist C'
+
+    def test_remove_batch_empty_list(self, cache):
+        cache.add_manual_concert('Artist A', '2026-08-01')
+        assert cache.remove_manual_concerts([]) == 0
+        assert len(cache.get_manual_concerts()) == 1
+
+    def test_not_cleared_by_clear_all(self, cache):
+        cache.add_manual_concert('Artist A', '2026-08-01')
+        cache.clear_all()
+        assert len(cache.get_manual_concerts()) == 1

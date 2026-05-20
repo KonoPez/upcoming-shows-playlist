@@ -26,11 +26,6 @@ MAX_TRACKS = 50
 MAX_SIMILAR = 50
 
 
-def _normalize_title(name: str) -> str:
-    """Lowercase + strip for fuzzy matching against Spotify track names."""
-    return name.lower().strip()
-
-
 class LastFmClient:
     def __init__(self, api_key: str, cache: Cache):
         self.api_key = api_key
@@ -164,7 +159,7 @@ class LastFmClient:
 
         counts: list[tuple[str, int]] = []
         for t in tracks:
-            name = _normalize_title(t.get('name', ''))
+            name = t.get('name', '').lower().strip()
             try:
                 count = int(t.get('playcount', 0))
             except (ValueError, TypeError):

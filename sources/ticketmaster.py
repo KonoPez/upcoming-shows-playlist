@@ -48,13 +48,8 @@ def _venue_matches(cal_venue: str, tm_venue: str) -> bool:
 
 def _extract_spotify_id(url: str) -> Optional[str]:
     """Extract a Spotify artist ID from a URL or URI string."""
-    m = re.search(r'spotify\.com/artist/([A-Za-z0-9]+)', url)
-    if m:
-        return m.group(1)
-    m = re.search(r'spotify:artist:([A-Za-z0-9]+)', url)
-    if m:
-        return m.group(1)
-    return None
+    m = re.search(r'spotify(?:\.com/artist/|:artist:)([A-Za-z0-9]+)', url)
+    return m.group(1) if m else None
 
 
 # ── Concert serialization (for KV cache) ─────────────────────────────────────

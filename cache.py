@@ -10,6 +10,7 @@ SQLite-backed cache used for two distinct purposes:
    novelty/familiarity scores improve over time with each weekly run.
 """
 
+import datetime
 import json
 import logging
 import sqlite3
@@ -71,6 +72,15 @@ class Cache:
                 CREATE TABLE IF NOT EXISTS discovery_blocklist (
                     artist_id   TEXT PRIMARY KEY,
                     artist_name TEXT NOT NULL,
+                    added_at    TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS manual_concerts (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    artist_name TEXT NOT NULL,
+                    event_date  TEXT NOT NULL,
+                    venue       TEXT NOT NULL DEFAULT '',
+                    event_name  TEXT NOT NULL DEFAULT '',
                     added_at    TEXT NOT NULL
                 );
             ''')
@@ -157,7 +167,6 @@ class Cache:
 
     def record_run(self, trigger: str) -> None:
         """Record a completed playlist update. trigger must be 'manual' or 'cron'."""
-        import datetime
         run_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._conn() as conn:
             conn.execute(
@@ -179,7 +188,6 @@ class Cache:
 
     def add_blocked_artist(self, artist_id: str, artist_name: str) -> None:
         """Add an artist to the discovery blocklist. Idempotent."""
-        import datetime
         added_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._conn() as conn:
             conn.execute(
@@ -202,6 +210,52 @@ class Cache:
             ).fetchall()
         return {row['artist_id']: row['artist_name'] for row in rows}
 
+    # ── Manual concerts ──────────────────────────────────────────────────────
+
+    def add_manual_concert(
+        self,
+        artist_name: str,
+        event_date: str,
+        venue: str = '',
+        event_name: str = '',
+    ) -> int:
+        """
+        Add a manual concert. event_date must be a YYYY-MM-DD string.
+        Returns the new row ID.
+        """
+        added_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                'INSERT INTO manual_concerts (artist_name, event_date, venue, event_name, added_at) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (artist_name, event_date, venue, event_name, added_at),
+            )
+            return conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+    def remove_manual_concert(self, concert_id: int) -> bool:
+        """Remove a manual concert by ID. Returns True if a row was deleted."""
+        with self._conn() as conn:
+            conn.execute('DELETE FROM manual_concerts WHERE id = ?', (concert_id,))
+            return conn.execute('SELECT changes()').fetchone()[0] > 0
+
+    def remove_manual_concerts(self, ids: list[int]) -> int:
+        """Batch-delete manual concerts by ID list. Returns count deleted."""
+        if not ids:
+            return 0
+        with self._conn() as conn:
+            placeholders = ','.join('?' * len(ids))
+            conn.execute(f'DELETE FROM manual_concerts WHERE id IN ({placeholders})', ids)
+            return conn.execute('SELECT changes()').fetchone()[0]
+
+    def get_manual_concerts(self) -> list[dict]:
+        """Return all manual concerts ordered by date."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                'SELECT id, artist_name, event_date, venue, event_name, added_at '
+                'FROM manual_concerts ORDER BY event_date'
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_summary(self) -> dict:
         """Return aggregate stats across all three tables for display."""
         now = time.time()
@@ -214,9 +268,6 @@ class Cache:
             ph_artists = conn.execute('SELECT COUNT(DISTINCT artist_id) FROM play_history').fetchone()[0]
 
             run_total = conn.execute('SELECT COUNT(*) FROM run_log').fetchone()[0]
-            last_run_row = conn.execute(
-                'SELECT run_at, trigger FROM run_log ORDER BY id DESC LIMIT 1'
-            ).fetchone()
 
         return {
             'kv_total': kv_total,
@@ -226,5 +277,5 @@ class Cache:
             'ph_tracks': ph_tracks,
             'ph_artists': ph_artists,
             'run_total': run_total,
-            'last_run': dict(last_run_row) if last_run_row else None,
+            'last_run': self.get_last_run(),
         }
