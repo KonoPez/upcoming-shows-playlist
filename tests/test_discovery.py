@@ -705,13 +705,23 @@ class TestComputeArtistSimilarityScores:
 
     def test_unknown_artist_scores_zero(self):
         result = self._run(['Unknown'], taste_profile={}, similar_map={'Unknown': {}})
-        assert result['Unknown'] == 0.0
+        assert result['unknown'] == 0.0
 
     def test_artist_similar_to_known_scores_above_zero(self):
         taste = {'radiohead': 1.0}
         similar = {'Candidate': {'radiohead': 0.9}}
         result = self._run(['Candidate'], taste, similar)
-        assert result['Candidate'] > 0.0
+        assert result['candidate'] > 0.0
+
+    def test_result_keys_are_lowercased(self):
+        # Regression: keys must be lowercased so callers looking up by
+        # artist_name.lower() (as cmd_discover does) actually match. A
+        # capitalized candidate name must not silently score 0.
+        taste = {'radiohead': 1.0}
+        similar = {'Massive Attack': {'radiohead': 0.9}}
+        result = self._run(['Massive Attack'], taste, similar)
+        assert 'Massive Attack' not in result
+        assert result['massive attack'] > 0.0
 
     def test_higher_taste_match_gives_higher_score(self):
         taste = {'radiohead': 1.0, 'portishead': 0.5}
@@ -719,7 +729,7 @@ class TestComputeArtistSimilarityScores:
         weak   = {'Weak':   {'portishead': 0.3}}
         r_strong = self._run(['Strong'], taste, strong)
         r_weak   = self._run(['Weak'],   taste, weak)
-        assert r_strong['Strong'] >= r_weak['Weak']
+        assert r_strong['strong'] >= r_weak['weak']
 
     def test_scores_normalised_between_zero_and_one(self):
         taste = {'radiohead': 1.0}
@@ -736,11 +746,11 @@ class TestComputeArtistSimilarityScores:
         taste = {'radiohead': 1.0}
         similar = {'Best': {'radiohead': 1.0}, 'Worse': {'radiohead': 0.5}}
         result = self._run(['Best', 'Worse'], taste, similar)
-        assert result['Best'] == pytest.approx(1.0)
+        assert result['best'] == pytest.approx(1.0)
 
     def test_all_zero_raw_scores_returns_all_zero(self):
         result = self._run(['A', 'B'], taste_profile={}, similar_map={'A': {}, 'B': {}})
-        assert result == {'A': 0.0, 'B': 0.0}
+        assert result == {'a': 0.0, 'b': 0.0}
 
     def test_get_similar_called_once_per_candidate(self):
         from playlist_logic.discovery_weighting import compute_artist_similarity_scores

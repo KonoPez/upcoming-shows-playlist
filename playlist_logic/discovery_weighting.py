@@ -134,17 +134,19 @@ def compute_artist_similarity_scores(
     taste_profile keys must already be lowercased; Last.fm names are
     lowercased before lookup.
     """
+    # Query Last.fm with the original-case name, but key the result lowercased
+    # so callers can look up by artist_name.lower() (see the module docstring).
     raw: dict[str, float] = {}
     for name in candidate_names:
         similar = lastfm_client.get_similar_artists(name)
-        raw[name] = sum(
+        raw[name.lower()] = sum(
             weight * taste_profile.get(similar_name, 0.0)
             for similar_name, weight in similar.items()
         )
 
     max_raw = max(raw.values()) if raw else 0.0
     if max_raw == 0.0:
-        return {name: 0.0 for name in candidate_names}
+        return {name.lower(): 0.0 for name in candidate_names}
 
     log_max = math.log(max_raw + 1)
     return {

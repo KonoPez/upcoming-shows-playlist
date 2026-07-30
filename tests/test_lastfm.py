@@ -89,6 +89,21 @@ class TestLastFmClient:
 
         assert result == {}
 
+    def test_max_playcount_of_one_returns_empty(self):
+        # Regression: when the top track has a single play, log(max)==0 would
+        # divide by zero. There's no popularity distribution to rank on, so the
+        # function must return {} (no signal) rather than crash.
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            'toptracks': {'track': _make_tracks([('Song A', 1), ('Song B', 1)])}
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch('sources.lastfm.requests.get', return_value=mock_resp):
+            result = _client().get_popularity_scores('Obscure Artist')
+
+        assert result == {}
+
     def test_empty_track_list_returns_empty(self):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'toptracks': {'track': []}}

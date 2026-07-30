@@ -171,6 +171,11 @@ class LastFmClient:
             return {}
 
         max_count = max(c for _, c in counts)
+        if max_count <= 1:
+            # Every track has a single play — no popularity distribution to rank
+            # on (and log(1) == 0 would divide by zero). Treat as no signal so the
+            # Last.fm weight drops out of scoring cleanly, like the no-data case.
+            return {}
         log_max = math.log(max_count)
 
         scores = {name: math.log(count) / log_max for name, count in counts}

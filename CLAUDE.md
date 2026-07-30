@@ -22,6 +22,9 @@ python main.py --discover-dry-run   # preview discovery playlist without writing
 python main.py --block-artist NAME  # block an artist from future discovery runs (matches by name against current playlist)
 python main.py --unblock-artist NAME # remove an artist from the discovery blocklist
 python main.py --list-blocked       # list all blocked artists
+python main.py --add-concert        # interactively add a manual concert (calendar-independent)
+python main.py --remove-concert     # interactively remove a manual concert
+python main.py --list-concerts      # list manually added concerts
 python main.py --cache-status       # show cache stats and last run info
 python main.py --clear-cache        # clear all cached data (preserves play history and run log)
 python main.py --update --cron      # mark this run as cron-triggered in the run log
@@ -67,6 +70,7 @@ tests/
   test_discovery.py             # Discovery scoring, familiarity, slot guarantee, TM local events
 conftest.py                     # Adds project root to sys.path for test imports
 setup_cron.py                   # Interactive cron installer — asks which playlists to schedule
+debug_artist_scores.py          # Dev tool: print per-signal track scores for one artist
 .env                            # Local secrets — never commit
 .env.example                    # Template with comments
 ```
@@ -86,7 +90,7 @@ setup_cron.py                   # Interactive cron installer — asks which play
 | `PLAYLIST_NAME` | No | Defaults to `Concert Prep` |
 | `TICKETMASTER_API_KEY` | No | Enables opener-act lookup; free key at developer.ticketmaster.com |
 | `SETLIST_FM_API_KEY` | No | Boosts tracks artists regularly play live; free key at setlist.fm/settings/apps |
-| `LASTFM_API_KEY` | No | Scores tracks by global play count popularity (dominant signal when set); free key at last.fm/api/account/create |
+| `LASTFM_API_KEY` | No | Scores tracks by global play count popularity (secondary signal); free key at last.fm/api/account/create |
 
 At least one calendar source must be configured for the prep playlist.
 
@@ -99,8 +103,6 @@ At least one calendar source must be configured for the prep playlist.
 | `DISCOVERY_PLAYLIST_NAME` | No | Defaults to `Concert Discoveries` |
 | `DISCOVERY_LOCATION` | No | City string e.g. `Madison, WI` — used if IP geo declined/unavailable |
 | `DISCOVERY_LAT_LNG` | No | Explicit coordinates e.g. `43.07,-89.40` — fallback if city fails |
-| `DISCOVERY_RADIUS_MILES` | No | Defaults to 50 |
-| `DISCOVERY_WINDOW_DAYS` | No | Defaults to 60 |
 
 On the first `--discover` run the user is asked for IP geolocation consent; the answer is cached permanently in the KV store (cleared by `--clear-cache`). If declined or if IP lookup fails, the user is prompted for a city string or lat/lng, with a tip to save it in `.env`.
 
@@ -118,7 +120,7 @@ On the first `--discover` run the user is asked for IP geolocation consent; the 
 
 **Variant recording filter**: `client._is_variant_recording(track_name, album_name)` skips live, acoustic, unplugged, remix, instrumental, and demo recordings before they enter the scoring pipeline. Album-level check (e.g. "Live at X", "Unplugged", "Remixes") skips the whole album. Track-level check matches both parenthetical suffixes (e.g. "Song (Live)") and dash suffixes (e.g. "Song - Acoustic", "Song - Demo") to avoid false positives on artistic titles like "Live Wire".
 
-**Track scoring** (see `playlist_logic/scoring.py`): Fixed base weights — Last.fm 45%, setlist 25%, recency 15%, novelty 15% — normalised by the sum of weights for signals that are actually available. This means relative signal importance is preserved regardless of which APIs are configured; no separate fallback weight sets are needed. Last.fm popularity (log-normalised global play counts from `artist.getTopTracks`) is the dominant signal when available. Setlist frequency (0.0–1.0) is how often the artist plays that track across their last 10 shows within the past year, sourced from setlist.fm. When setlist data is available but a track was never played live, it is penalised (the weight enters the denominator with a zero contribution), reflecting that live omission is meaningful signal. Recency is a linear decay over 18 months. Novelty is the inverse of familiarity. Familiarity combines Spotify top-tracks API signal and local play-count history, taking the max. A per-album cap (default 6 tracks) prevents a single album from dominating; selected tracks are then interleaved across albums (newest first, round-robin) to avoid consecutive same-album runs.
+**Track scoring** (see `playlist_logic/scoring.py`): Fixed base weights — setlist 55%, Last.fm 10%, recency 10%, novelty 25% — normalised by the sum of weights for signals that are actually available. This means relative signal importance is preserved regardless of which APIs are configured; no separate fallback weight sets are needed. Setlist frequency is the dominant signal when available; Last.fm popularity (log-normalised global play counts from `artist.getTopTracks`) is a secondary signal. Setlist frequency (0.0–1.0) is how often the artist plays that track across their last 10 shows within the past year, sourced from setlist.fm. When setlist data is available but a track was never played live, it is penalised (the weight enters the denominator with a zero contribution), reflecting that live omission is meaningful signal. Recency is a linear decay over 18 months. Novelty is the inverse of familiarity. Familiarity combines Spotify top-tracks API signal and local play-count history, taking the max. A per-album cap (default 6 tracks) prevents a single album from dominating; selected tracks are then interleaved across albums (newest first, round-robin) to avoid consecutive same-album runs.
 
 **Setlist.fm integration** (`sources/setlist.py`): `SetlistClient.get_setlist_scores(artist_name)` fetches up to 10 recent shows (within the past year) via `GET /search/setlists?artistName=`. Each song appearance is counted — a song played twice in one show (e.g. as an encore) counts twice, since repeated performance is meaningful signal. Frequency = appearances / shows_analysed, and can exceed 1.0. A 1-second sleep is inserted before each API call to respect rate limits. Results cached 7 days; empty results are also cached to avoid re-hitting the API for artists with no data.
 

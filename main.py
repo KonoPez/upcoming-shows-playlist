@@ -475,15 +475,16 @@ def resolve_discovery_location(cache: 'Cache') -> 'tuple[str | None, str | None]
     Determine the location to use for concert discovery.
     Returns (latlong, city) with exactly one non-None.
 
-    Resolution order on first run (no cached consent):
-      1. Prompt for IP geolocation consent; cache the answer permanently.
-      2. If consented and IP lookup succeeds → latlong.
-      3. Otherwise prompt for city name; fall through to latlong prompt if skipped.
-      4. If city skipped → prompt for lat,lng.
+    Resolution order:
+      0. Explicit config (DISCOVERY_LAT_LNG or DISCOVERY_LOCATION) always wins and
+         is returned immediately with no prompting.
+      1. Otherwise, on the first run, prompt for IP-geolocation consent and cache
+         the answer permanently (reused on later runs; cleared by --clear-cache).
+      2. If consented, IP lookup is attempted every run (location may change) → latlong.
+      3. If IP is declined or fails, prompt for a city name;
+      4. if the city prompt is skipped, prompt for lat,lng.
 
-    On subsequent runs the cached consent answer is reused; IP is re-attempted
-    each time if consented (location may change), falling back to config values
-    or a prompt if it fails.
+    Raises ValueError if none of the above yields a location.
     """
     IP_CONSENT_KEY = 'ip_geo_consent'
     # ~10 years — effectively permanent; cleared by --clear-cache
@@ -767,12 +768,12 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     )
 
     if not concerts:
-        print('No upcoming concerts found in your area. Try increasing DISCOVERY_RADIUS_MILES.')
+        print('No upcoming concerts found in your area. Try increasing discovery_radius_miles in config.py.')
         return
 
     logger.info(f'Found {len(concerts)} artist slots across local events')
 
-    # 4. Collect calendar artist names to exclude (already have tickets)
+    # 3. Collect calendar artist names to exclude (already have tickets)
     #     fetch_all_concerts returns empty if no calendar is configured.
     #     enrich_with_openers adds opening acts so they're excluded too —
     #     if you already have a ticket, you'll see the whole bill.
@@ -789,7 +790,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     if calendar_artist_names:
         logger.info(f'Found {len(calendar_artist_names)} calendar artist(s) to exclude')
 
-    # 5. Authenticate with Spotify
+    # 4. Authenticate with Spotify
     sp_raw = get_spotify_client(
         client_id=config.spotify_client_id,
         redirect_uri=config.spotify_redirect_uri,
@@ -798,13 +799,13 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     )
     sp = SpotifyClient(sp_raw)
 
-    # 6. Accumulate play history so familiarity scores improve over time
+    # 5. Accumulate play history so familiarity scores improve over time
     logger.info('Syncing play history…')
     plays = sp.get_recently_played_with_artists(cache)
     new_plays = cache.record_plays(plays)
     logger.info(f'Recorded {new_plays} new play events')
 
-    # 7. Resolve each artist name → Spotify artist ID; deduplicate
+    # 6. Resolve each artist name → Spotify artist ID; deduplicate
     logger.info('Resolving artists to Spotify profiles…')
     artists: dict[str, Artist] = {}
     seen: set[tuple[str, date]] = set()
@@ -833,7 +834,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
 
-    # 9. Remove artists the user already has tickets to (calendar sources)
+    # 7. Remove artists the user already has tickets to (calendar sources)
     if calendar_artist_names:
         calendar_ids = {
             cid for name in calendar_artist_names
@@ -848,7 +849,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             print('All nearby artists are already in your concert calendar — nothing new to discover!')
             return
 
-    # 10. Filter blocked artists
+    # 8. Filter blocked artists
     blocked_ids = cache.get_blocked_artists()
     if blocked_ids:
         before = len(artists)
@@ -862,7 +863,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     candidate_ids = list(artists.keys())
 
-    # 11. Compute artist familiarity
+    # 9. Compute artist familiarity
     logger.info('Computing artist familiarity…')
     top_scores  = sp.get_artist_top_scores(cache)
     play_counts = cache.get_artist_play_counts()
@@ -871,7 +872,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     taste_profile    = {v.name.lower(): v.score for v in top_scores.values()}
     familiarity = compute_artist_familiarity_scores(candidate_ids, top_score_values, play_counts)
 
-    # 12. Fetch Last.fm signals (optional — skipped if LASTFM_API_KEY not set)
+    # 10. Fetch Last.fm signals (optional — skipped if LASTFM_API_KEY not set)
     raw_listeners: dict[str, int] = {}
     similarity_by_id: dict[str, float] = {}
     if config.lastfm_api_key:
@@ -894,7 +895,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             for aid in candidate_ids
         }
 
-    # 13. Score + select artists (floor + cap)
+    # 11. Score + select artists (floor + cap)
     selected_ids, enjoyment_scores = select_discovery_artists(
         candidate_ids=candidate_ids,
         familiarity_scores=familiarity,
@@ -910,7 +911,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     artists = {aid: artists[aid] for aid in selected_ids}
 
-    # 14. Allocate duration budgets weighted by enjoyment × proximity
+    # 12. Allocate duration budgets weighted by enjoyment × proximity
     weights = compute_discovery_weights(artists, enjoyment_scores, today)
     slots   = allocate_slots(
         weights,
@@ -918,11 +919,11 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         min_duration_ms=0,   # every selected artist gets a slot; select_tracks rounds up to 1 track
     )
 
-    # 15. Get track-level familiarity for scoring
+    # 13. Get track-level familiarity for scoring
     logger.info('Fetching Spotify listening history…')
     spotify_familiarity = sp.get_user_familiarity(cache)
 
-    # 16. Select tracks per artist (identical pipeline to prep playlist)
+    # 14. Select tracks per artist (identical pipeline to prep playlist)
     setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
         if config.setlist_fm_api_key else None
     lastfm_track_client = LastFmClient(config.lastfm_api_key, cache) \
@@ -958,7 +959,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             f'concert in {nearest}d)'
         )
 
-    # 17. Flatten to ordered track list (highest-enjoyment artist first)
+    # 15. Flatten to ordered track list (highest-enjoyment artist first)
     all_tracks: list[Track] = []
     for artist_id in sorted(slots, key=lambda aid: -enjoyment_scores.get(aid, 0.0)):
         all_tracks.extend(artists[artist_id].selected_tracks)
@@ -967,7 +968,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     total      = len(track_uris)
     total_min  = sum(t.duration_ms for t in all_tracks) // 60_000
 
-    # 18. Dry run: print summary and exit
+    # 16. Dry run: print summary and exit
     if dry_run:
         artists_with_tracks = sum(1 for a in artists.values() if a.selected_tracks)
         print(f'\n=== DISCOVERY DRY RUN — {total} tracks (~{total_min}m) from {artists_with_tracks} artists ===\n')
@@ -994,7 +995,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             print()
         return
 
-    # 19. Update Spotify discovery playlist
+    # 17. Update Spotify discovery playlist
     playlist_id = sp.get_or_create_playlist(
         config.discovery_playlist_name,
         config.discovery_playlist_id,
