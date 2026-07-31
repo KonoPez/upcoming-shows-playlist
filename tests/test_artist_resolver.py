@@ -90,6 +90,16 @@ class TestExtractArtistFromCalendarTitle:
             "Paramore: This Is Why Tour"
         ) == "Paramore"
 
+    # ── Artist | Tour Name (pipe — ticketing format) ──────────────────────────
+
+    def test_pipe_tour(self):
+        # Ticketing calendars format events as "ARTIST | Tour Name"; without a
+        # pipe rule the "...Tour" suffix pattern would greedily keep the whole
+        # subtitle. The pipe must win so only the artist survives.
+        assert extract_artist_from_calendar_title(
+            "Ticket: INOHA | This Might Be Useful Tour 2026"
+        ) == "INOHA"
+
     # ── Artist - Tour Name (dash) ─────────────────────────────────────────────
 
     def test_dash_tour(self):

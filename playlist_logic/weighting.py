@@ -2,7 +2,8 @@
 Concert-proximity weighting and track-slot allocation.
 
 Weights follow exponential decay with a 21-day half-life:
-  - Concert tomorrow  → weight ≈ 1.00
+  - Concert today     → weight = 1.00
+  - Concert tomorrow  → weight ≈ 0.968
   - Concert in 3 wks  → weight ≈ 0.50
   - Concert in 6 wks  → weight ≈ 0.25
   - Concert in 90 days → weight ≈ 0.056
@@ -33,9 +34,10 @@ HEADLINER_BONUS = 1.5   # headliners receive 1.5× the base proximity weight vs 
 def concert_weight(days_until: int) -> float:
     """
     Exponential weight for a concert that is `days_until` days away.
-    Returns 0.0 for concerts in the past (days_until <= 0).
+    A concert today (days_until == 0) receives the peak weight, 1.0.
+    Returns 0.0 for concerts in the past (days_until < 0).
     """
-    if days_until <= 0:
+    if days_until < 0:
         return 0.0
     return math.exp(-_LAMBDA * days_until)
 

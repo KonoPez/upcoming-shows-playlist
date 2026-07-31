@@ -187,6 +187,7 @@ def extract_artist_from_calendar_title(title: str) -> str:
       "An Evening with Norah Jones"
       "boygenius (SOLD OUT)"
       "Paramore: This Is Why Tour"
+      "INOHA | This Might Be Useful Tour 2026"
       "Vampire Weekend Live"
     """
     # Strip known label prefixes — e.g. "Ticket: Artist Name" or "Tickets: ..."
@@ -202,6 +203,7 @@ def extract_artist_from_calendar_title(title: str) -> str:
         (r'^(.+?)\s+at\s+(?:the\s+)?\w', 1),                  # Artist at [The] Venue
         (r'^An\s+Evening\s+with\s+(.+?)$', 1),                 # An Evening with Artist
         (r'^(.+?)\s*:\s*', 1),                                  # Artist: Subtitle
+        (r'^(.+?)\s*\|\s*', 1),                                 # Artist | Tour Name (ticketing format)
         (r'^(.+?)\s+[-–]\s+', 1),                              # Artist - Tour Name
         (r'^(.+?)\s+(?:Live|Concert|Tour|Show|Presents)\b', 1), # Artist Live/Tour/Show
     ]

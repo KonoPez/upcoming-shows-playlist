@@ -71,9 +71,18 @@ class TestNormalizeTrackName:
 
 class TestConcertWeight:
     def test_past_concert_is_zero(self):
-        assert concert_weight(0) == 0.0
         assert concert_weight(-1) == 0.0
         assert concert_weight(-100) == 0.0
+
+    def test_today_is_peak_weight(self):
+        assert concert_weight(0) == 1.0
+
+    def test_today_outranks_tomorrow_past_is_zero(self):
+        # Regression: a concert happening today must be strictly more
+        # proximate than one tomorrow, and a concert one day in the past
+        # must be weightless — today is NOT "already over".
+        assert concert_weight(0) > concert_weight(1)
+        assert concert_weight(-1) == 0.0
 
     def test_tomorrow_is_near_one(self):
         assert concert_weight(1) > 0.95
@@ -87,7 +96,7 @@ class TestConcertWeight:
         assert abs(w - 0.25) < 0.01
 
     def test_weight_strictly_decreases(self):
-        assert concert_weight(1) > concert_weight(10) > concert_weight(30) > concert_weight(90)
+        assert concert_weight(0) > concert_weight(1) > concert_weight(10) > concert_weight(30) > concert_weight(90)
 
 
 # ── compute_artist_weights ────────────────────────────────────────────────────
@@ -107,8 +116,15 @@ class TestComputeArtistWeights:
         assert abs(weights['a1'] - expected) < 1e-9
 
     def test_past_concerts_excluded(self):
-        weights = compute_artist_weights({'a1': [_concert(0), _concert(-1), _concert(-30)]}, _TODAY)
+        weights = compute_artist_weights({'a1': [_concert(-1), _concert(-30)]}, _TODAY)
         assert 'a1' not in weights
+
+    def test_todays_concert_is_included(self):
+        # A concert happening today is the most proximate possible — it must
+        # NOT be treated the same as a past show.
+        weights = compute_artist_weights({'a1': [_concert(0)]}, _TODAY)
+        assert 'a1' in weights
+        assert abs(weights['a1'] - concert_weight(0) * HEADLINER_BONUS) < 1e-9
 
     def test_mixed_past_and_future_only_sums_future(self):
         weights = compute_artist_weights({'a1': [_concert(-5), _concert(10)]}, _TODAY)
@@ -183,10 +199,15 @@ class TestComputeArtistWeightsManual:
         assert abs(weights['a2'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
     def test_past_manual_concert_excluded(self):
-        weights = compute_artist_weights({'a1': [_manual_concert(0)]}, _TODAY)
-        assert 'a1' not in weights
         weights = compute_artist_weights({'a1': [_manual_concert(-5)]}, _TODAY)
         assert 'a1' not in weights
+
+    def test_todays_manual_concert_is_included(self):
+        # A manual concert happening today is fully proximate, not "already
+        # over" — it must be included, unlike a genuinely past manual concert.
+        weights = compute_artist_weights({'a1': [_manual_concert(0)]}, _TODAY)
+        assert 'a1' in weights
+        assert abs(weights['a1'] - concert_weight(0) * HEADLINER_BONUS) < 1e-9
 
 
 # ── allocate_slots ────────────────────────────────────────────────────────────
