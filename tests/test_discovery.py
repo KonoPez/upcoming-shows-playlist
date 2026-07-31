@@ -112,13 +112,6 @@ class TestScoreArtistEnjoyment:
         with_sim = score_artist_enjoyment(0.0, None, similarity=1.0)
         assert with_sim > without
 
-    def test_all_three_signals_blended(self):
-        from playlist_logic.discovery_weighting import SIMILARITY_W
-        fam, pop, sim = 1.0, 1.0, 1.0
-        total_w = FAMILIARITY_W + POPULARITY_W + SIMILARITY_W
-        expected = (FAMILIARITY_W + POPULARITY_W + SIMILARITY_W) / total_w
-        assert score_artist_enjoyment(fam, pop, sim) == pytest.approx(expected)
-
     def test_all_three_full_scores_to_one(self):
         assert score_artist_enjoyment(1.0, 1.0, 1.0) == pytest.approx(1.0)
 
@@ -724,12 +717,17 @@ class TestComputeArtistSimilarityScores:
         assert result['massive attack'] > 0.0
 
     def test_higher_taste_match_gives_higher_score(self):
+        # Both candidates must be scored in the same _run call so they share
+        # the same log-normalisation denominator (max_raw across the set).
+        # Scoring them in separate calls would trivially normalise each
+        # single candidate to 1.0, making the assertion tautological.
         taste = {'radiohead': 1.0, 'portishead': 0.5}
-        strong = {'Strong': {'radiohead': 0.9}}
-        weak   = {'Weak':   {'portishead': 0.3}}
-        r_strong = self._run(['Strong'], taste, strong)
-        r_weak   = self._run(['Weak'],   taste, weak)
-        assert r_strong['strong'] >= r_weak['weak']
+        similar = {
+            'Strong': {'radiohead': 0.9},   # raw = 0.9 * 1.0 = 0.9
+            'Weak':   {'portishead': 0.3},  # raw = 0.3 * 0.5 = 0.15
+        }
+        result = self._run(['Strong', 'Weak'], taste, similar)
+        assert result['strong'] > result['weak']
 
     def test_scores_normalised_between_zero_and_one(self):
         taste = {'radiohead': 1.0}

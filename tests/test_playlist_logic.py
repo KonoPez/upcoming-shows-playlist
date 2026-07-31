@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from sources.models import Concert, Track
+from sources.models import Concert, Track, normalize_track_name
 from playlist_logic.weighting import (
     HALF_LIFE_DAYS,
     HEADLINER_BONUS,
@@ -38,6 +38,33 @@ def _concert(days_until: int, is_opener: bool = False) -> Concert:
         source='test',
         is_opener=is_opener,
     )
+
+
+# ── normalize_track_name ──────────────────────────────────────────────────────
+
+class TestNormalizeTrackName:
+    def test_dash_live_variant_stripped(self):
+        assert normalize_track_name('Dancers - Live at Bush Hall') == 'dancers'
+
+    def test_paren_live_variant_stripped(self):
+        assert normalize_track_name('Song (Live at Glastonbury)') == 'song'
+
+    def test_paren_acoustic_variant_stripped(self):
+        assert normalize_track_name('Song (Acoustic Version)') == 'song'
+
+    def test_plain_name_unchanged(self):
+        assert normalize_track_name('Concorde') == 'concorde'
+
+    def test_uppercase_is_lowercased(self):
+        assert normalize_track_name('CONCORDE') == 'concorde'
+
+    def test_live_wire_not_stripped(self):
+        # "Live" appears in the title itself, not as a parenthetical/dash
+        # variant suffix, so it must be left intact.
+        assert normalize_track_name('Live Wire') == 'live wire'
+
+    def test_dash_demo_variant_stripped(self):
+        assert normalize_track_name('Song - Demo') == 'song'
 
 
 # ── concert_weight ────────────────────────────────────────────────────────────
@@ -112,6 +139,56 @@ class TestComputeArtistWeights:
         assert abs(weights['a'] - expected) < 1e-9
 
 
+def _manual_concert(days_until: int, event_name: str = 'Manual Show', is_opener: bool = False) -> Concert:
+    """Build a manual-source Concert a fixed number of days from _TODAY."""
+    return Concert(
+        event_name=event_name,
+        artist_name='Artist',
+        event_date=_TODAY + timedelta(days=days_until),
+        venue='Venue',
+        source='manual',
+        is_opener=is_opener,
+    )
+
+
+class TestComputeArtistWeightsManual:
+    """Manual-source concerts use event-level normalization: all artists
+    sharing the same (event_date, event_name) collectively contribute exactly
+    one headliner's worth of weight, split proportionally by role."""
+
+    def test_single_manual_headliner_matches_non_manual_headliner(self):
+        weights = compute_artist_weights({'a1': [_manual_concert(10)]}, _TODAY)
+        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+
+    def test_festival_event_sums_to_one_headliners_worth(self):
+        # One event (same date + event_name), 1 headliner + 2 openers, all manual.
+        weights = compute_artist_weights({
+            'h':  [_manual_concert(10, event_name='Fest', is_opener=False)],
+            'o1': [_manual_concert(10, event_name='Fest', is_opener=True)],
+            'o2': [_manual_concert(10, event_name='Fest', is_opener=True)],
+        }, _TODAY)
+        total = weights['h'] + weights['o1'] + weights['o2']
+        assert abs(total - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+        assert weights['h'] > weights['o1']
+        assert weights['h'] > weights['o2']
+
+    def test_separate_manual_events_do_not_dilute_each_other(self):
+        # Two distinct events (different event_name) on the same day, each
+        # with a single manual artist — neither should be diluted by the other.
+        weights = compute_artist_weights({
+            'a1': [_manual_concert(10, event_name='Event A')],
+            'a2': [_manual_concert(10, event_name='Event B')],
+        }, _TODAY)
+        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+        assert abs(weights['a2'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+
+    def test_past_manual_concert_excluded(self):
+        weights = compute_artist_weights({'a1': [_manual_concert(0)]}, _TODAY)
+        assert 'a1' not in weights
+        weights = compute_artist_weights({'a1': [_manual_concert(-5)]}, _TODAY)
+        assert 'a1' not in weights
+
+
 # ── allocate_slots ────────────────────────────────────────────────────────────
 
 _MIN_MS = 420_000    # 2 tracks × 3.5 min — minimum budget threshold in tests
@@ -157,6 +234,32 @@ class TestAllocateSlots:
         weights = {'a': 1.0, 'b': 1.0}
         slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
         assert slots['a'] == slots['b'] == _TARGET_MS // 2
+
+    def test_min_duration_exclusion_redistributes_remaining_budget(self):
+        # 'tiny' is dropped for falling below the proportional min-duration
+        # floor; the full target must still be distributed across the
+        # artists that remain qualified (not silently lost).
+        weights = {'a': 10.0, 'b': 5.0, 'tiny': 0.001}
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        assert 'tiny' not in slots
+        assert sum(slots.values()) == _TARGET_MS
+        assert slots['a'] > slots['b']
+
+    def test_no_artist_qualifies_falls_back_to_single_highest_weight(self):
+        # If min_duration_ms is so large that nobody's proportional share
+        # clears it, the whole target goes to the single highest-weight
+        # artist rather than returning an empty allocation.
+        weights = {'a': 1.0, 'b': 0.5, 'c': 0.25}
+        slots = allocate_slots(weights, target_duration_ms=1000, min_duration_ms=10_000_000)
+        assert slots == {'a': 1000}
+
+
+# Note: allocate_slots has a final "overage-trim" branch that only runs when the
+# min_duration_ms floors push the summed budget past target_duration_ms. It is
+# unreachable under the function's `int` contract: for every qualified artist
+# exact_q >= exact >= min_duration_ms, so floor(exact_q) >= min_duration_ms and
+# the max() clamp is a no-op, leaving sum(floors) <= target. It's defensive code
+# — deliberately left untested rather than exercised via off-contract input.
 
 
 # ── _parse_release_date ───────────────────────────────────────────────────────

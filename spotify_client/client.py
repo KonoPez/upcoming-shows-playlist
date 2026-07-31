@@ -404,8 +404,8 @@ class SpotifyClient:
         )
         return all_tracks
 
-    def _get_artist_albums(self, artist_id: str) -> list[Track]:
-        """Return the most recent MAX_ALBUMS_PER_ARTIST albums + singles."""
+    def _get_artist_albums(self, artist_id: str) -> list[dict]:
+        """Return the most recent MAX_ALBUMS_PER_ARTIST albums + singles (raw album dicts)."""
         import logging as _logging
         _spotipy_logger = _logging.getLogger('spotipy.client')
         _orig_level = _spotipy_logger.level

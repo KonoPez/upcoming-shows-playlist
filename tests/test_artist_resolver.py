@@ -324,6 +324,46 @@ class TestResolveArtist:
         assert resolve_artist("Ghost Artist", sp, cache) is None
         sp.search.assert_not_called()
 
+    # ── Priority 1: Ticketmaster-provided Spotify ID ──────────────────────────
+
+    def test_tm_spotify_id_resolves_without_search(self, tmp_path):
+        cache = Cache(db_path=tmp_path / 'test.db')
+        sp = MagicMock()
+        sp.artist.return_value = {'id': 'tm_abc'}
+
+        result = resolve_artist("Some Artist", sp, cache, tm_spotify_id='tm_abc')
+
+        assert result == 'tm_abc'
+        sp.artist.assert_called_once_with('tm_abc')
+        sp.search.assert_not_called()
+
+    def test_tm_spotify_id_cached_with_long_ttl(self, tmp_path):
+        cache = Cache(db_path=tmp_path / 'test.db')
+        sp = MagicMock()
+        sp.artist.return_value = {'id': 'tm_abc'}
+
+        assert resolve_artist("Some Artist", sp, cache, tm_spotify_id='tm_abc') == 'tm_abc'
+
+        with sqlite3.connect(str(tmp_path / 'test.db')) as conn:
+            (expires_at,) = conn.execute(
+                "SELECT expires_at FROM kv_cache WHERE key = 'artist_resolve:some artist'"
+            ).fetchone()
+        assert abs(expires_at - (time.time() + RESOLUTION_TTL)) < 5
+
+    def test_tm_spotify_id_verification_failure_falls_back_to_search(self, tmp_path):
+        cache = Cache(db_path=tmp_path / 'test.db')
+        sp = MagicMock()
+        sp.artist.side_effect = Exception('bad id')
+        sp.search.return_value = {'artists': {'items': [
+            {'id': 'search_id', 'name': 'Some Artist'},
+        ]}}
+
+        result = resolve_artist("Some Artist", sp, cache, tm_spotify_id='tm_bad_id')
+
+        assert result == 'search_id'
+        sp.artist.assert_called_once_with('tm_bad_id')
+        sp.search.assert_called_once()
+
 
 class TestSplitArtistNames:
     # ── Single-artist passthrough ─────────────────────────────────────────────
