@@ -130,8 +130,8 @@ class Cache:
         Each entry must have: track_id, artist_id, played_at (ISO-8601 string).
         Returns the number of newly inserted rows.
         """
-        inserted = 0
         with self._conn() as conn:
+            before = conn.total_changes
             for play in plays:
                 try:
                     conn.execute(
@@ -139,10 +139,9 @@ class Cache:
                         'VALUES (?, ?, ?)',
                         (play['track_id'], play['artist_id'], play['played_at']),
                     )
-                    if conn.execute('SELECT changes()').fetchone()[0]:
-                        inserted += 1
                 except sqlite3.Error as e:
                     logger.debug(f'Skipping play record: {e}')
+            inserted = conn.total_changes - before
         return inserted
 
     def get_artist_play_counts(self) -> dict[str, int]:

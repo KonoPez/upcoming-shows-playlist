@@ -219,8 +219,13 @@ def compute_discovery_weights(
     weights: dict[str, float] = {}
     for artist_id, artist in artists.items():
         enjoyment  = enjoyment_scores.get(artist_id, 0.0)
-        nearest    = min(c.days_until(today) for c in artist.concerts)
-        proximity  = concert_weight(nearest) ** PROXIMITY_EXPONENT
+        # max over concert_weights = the nearest *upcoming* concert's proximity
+        # (concert_weight is 0 for past/today shows), so a past show can't zero
+        # out an artist who also has a real upcoming one.
+        proximity  = max(
+            (concert_weight(c.days_until(today)) for c in artist.concerts),
+            default=0.0,
+        ) ** PROXIMITY_EXPONENT
         weights[artist_id] = (enjoyment ** ENJOYMENT_EXPONENT) * proximity
 
     return weights

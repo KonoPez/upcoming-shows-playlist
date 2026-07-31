@@ -55,9 +55,13 @@ def deduplicate_tracks(
 
     Within each group the representative is chosen by priority:
       1. Exactly one non-variant exists → use it.
-      2. Multiple candidates (all non-variants, or all variants when no studio
-         version exists) → pick the one with the highest Last.fm score.
-      3. Last.fm unavailable or all tied → shortest track title.
+      2. Otherwise (multiple non-variants, or all variants) → highest Last.fm
+         score. Note this looks Last.fm up by the *literal* track name, not the
+         normalized group key, so it only distinguishes candidates in the rare
+         case where a candidate's exact title is itself a Last.fm top track
+         (e.g. a well-known live/variant recording when no studio version
+         exists). When candidates share a base name they score equally here.
+      3. Last.fm unavailable or all tied (the common case) → shortest track title.
       4. Still tied → first in the list (albums are newest-first, so this
          naturally favours the more recent pressing).
     """
@@ -355,10 +359,10 @@ class SpotifyClient:
             return []
 
         # Collect studio and variant tracks separately, each deduped by base name
-        # keeping the newest version within its category.  Both are stored so
-        # deduplicate_tracks() can later pick the best representative per song.
-        studio_by_name: dict[str, Track] = {}   # base_name → newest non-variant
-        variant_by_name: dict[str, Track] = {}  # base_name → newest variant
+        # keeping the OLDEST version per category so a later re-recording can't
+        # silently overwrite the original. deduplicate_tracks() picks between them.
+        studio_by_name: dict[str, Track] = {}   # base_name → oldest non-variant
+        variant_by_name: dict[str, Track] = {}  # base_name → oldest variant
 
         for album in albums:
             album_id = album['id']
@@ -377,7 +381,7 @@ class SpotifyClient:
                 target = variant_by_name if is_variant else studio_by_name
 
                 existing = target.get(base)
-                if existing and existing.release_date >= release_date:
+                if existing and existing.release_date <= release_date:
                     continue
 
                 target[base] = Track(
@@ -456,23 +460,22 @@ class SpotifyClient:
 
         albums.sort(key=sort_key, reverse=True)
 
-        seen_names: set[str] = set()
-        deduped: list[dict] = []
-        for a in albums:
-            # Normalise album name: strip "(Deluxe)", "(Remaster)", etc.
-            norm = (
-                a.get('name', '')
-                .lower()
-                .split('(')[0]
-                .strip()
-            )
-            if norm not in seen_names:
-                seen_names.add(norm)
-                deduped.append(a)
-            if len(deduped) >= MAX_ALBUMS_PER_ARTIST:
-                break
+        # Dedup by normalised name (strips "(Deluxe)", "(Live)", etc.). On a
+        # collision a non-variant beats a variant so a later live/acoustic
+        # re-release can't displace the studio original; else newest wins.
+        def _is_variant_album(a: dict) -> bool:
+            return bool(_VARIANT_ALBUM_RE.search(a.get('name', '')))
 
-        return deduped
+        chosen: dict[str, dict] = {}
+        for a in albums:
+            norm = a.get('name', '').lower().split('(')[0].strip()
+            existing = chosen.get(norm)
+            if existing is None:
+                chosen[norm] = a
+            elif _is_variant_album(existing) and not _is_variant_album(a):
+                chosen[norm] = a   # non-variant displaces variant, even if older
+
+        return sorted(chosen.values(), key=sort_key, reverse=True)[:MAX_ALBUMS_PER_ARTIST]
 
     def _get_album_tracks(self, album_id: str) -> list[Track]:
         tracks: list[dict] = []
