@@ -81,9 +81,18 @@ class Cache:
                     event_date  TEXT NOT NULL,
                     venue       TEXT NOT NULL DEFAULT '',
                     event_name  TEXT NOT NULL DEFAULT '',
+                    is_opener   INTEGER NOT NULL DEFAULT 0,
                     added_at    TEXT NOT NULL
                 );
             ''')
+
+            # Migration: add is_opener to manual_concerts tables created before
+            # the column existed. CREATE TABLE IF NOT EXISTS won't add it.
+            cols = [r['name'] for r in conn.execute('PRAGMA table_info(manual_concerts)')]
+            if 'is_opener' not in cols:
+                conn.execute(
+                    'ALTER TABLE manual_concerts ADD COLUMN is_opener INTEGER NOT NULL DEFAULT 0'
+                )
 
     # ── Key-value cache ──────────────────────────────────────────────────────
 
@@ -217,17 +226,20 @@ class Cache:
         event_date: str,
         venue: str = '',
         event_name: str = '',
+        is_opener: bool = False,
     ) -> int:
         """
         Add a manual concert. event_date must be a YYYY-MM-DD string.
+        Set is_opener=True for a supporting act (headliner is the default).
         Returns the new row ID.
         """
         added_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._conn() as conn:
             conn.execute(
-                'INSERT INTO manual_concerts (artist_name, event_date, venue, event_name, added_at) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (artist_name, event_date, venue, event_name, added_at),
+                'INSERT INTO manual_concerts '
+                '(artist_name, event_date, venue, event_name, is_opener, added_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (artist_name, event_date, venue, event_name, int(is_opener), added_at),
             )
             return conn.execute('SELECT last_insert_rowid()').fetchone()[0]
 
@@ -250,10 +262,15 @@ class Cache:
         """Return all manual concerts ordered by date."""
         with self._conn() as conn:
             rows = conn.execute(
-                'SELECT id, artist_name, event_date, venue, event_name, added_at '
+                'SELECT id, artist_name, event_date, venue, event_name, is_opener, added_at '
                 'FROM manual_concerts ORDER BY event_date'
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            entry = dict(row)
+            entry['is_opener'] = bool(entry['is_opener'])
+            result.append(entry)
+        return result
 
     def get_summary(self) -> dict:
         """Return aggregate stats across all three tables for display."""

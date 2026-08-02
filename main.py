@@ -244,6 +244,7 @@ def fetch_all_concerts(
                     event_date=event_date,
                     venue=entry['venue'] or 'Manual entry',
                     source='manual',
+                    is_opener=entry['is_opener'],
                 ))
         if expired_ids:
             removed = cache.remove_manual_concerts(expired_ids)
@@ -599,7 +600,8 @@ def cmd_list_concerts() -> None:
     for e in entries:
         days = (date.fromisoformat(e['event_date']) - today).days
         venue_str = f' @ {e["venue"]}' if e['venue'] else ''
-        print(f'  [{e["id"]}] {e["artist_name"]}{venue_str}  —  {e["event_date"]}  ({days}d away)')
+        role_str = ' (opener)' if e['is_opener'] else ''
+        print(f'  [{e["id"]}] {e["artist_name"]}{role_str}{venue_str}  —  {e["event_date"]}  ({days}d away)')
     print()
 
 
@@ -625,10 +627,17 @@ def cmd_add_concert() -> None:
 
     venue      = input('Venue (optional, press Enter to skip): ').strip()
     event_name = input('Event name (optional, press Enter to use artist name): ').strip()
+    is_opener  = input('Opening act? [y/N]: ').strip().lower() in ('y', 'yes')
+    if is_opener and not event_name:
+        print('Tip: set the Event name to the headliner\'s so this act is grouped '
+              'on the same bill (they\'ll share the show\'s weight).')
 
-    concert_id = Cache().add_manual_concert(artist_name, date_str, venue, event_name)
+    concert_id = Cache().add_manual_concert(
+        artist_name, date_str, venue, event_name, is_opener
+    )
     venue_str  = f' @ {venue}' if venue else ''
-    print(f'\nAdded: {artist_name}{venue_str} on {date_str}  (ID: {concert_id})')
+    role_str   = ' (opener)' if is_opener else ''
+    print(f'\nAdded: {artist_name}{venue_str} on {date_str}{role_str}  (ID: {concert_id})')
 
 
 def cmd_remove_concert() -> None:
@@ -643,7 +652,8 @@ def cmd_remove_concert() -> None:
     for e in entries:
         days = (date.fromisoformat(e['event_date']) - today).days
         venue_str = f' @ {e["venue"]}' if e['venue'] else ''
-        print(f'  [{e["id"]}] {e["artist_name"]}{venue_str}  —  {e["event_date"]}  ({days}d away)')
+        role_str = ' (opener)' if e['is_opener'] else ''
+        print(f'  [{e["id"]}] {e["artist_name"]}{role_str}{venue_str}  —  {e["event_date"]}  ({days}d away)')
 
     choice = input('\nEnter ID to remove (or q to cancel): ').strip().lower()
     if not choice or choice == 'q':

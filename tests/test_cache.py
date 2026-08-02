@@ -173,6 +173,16 @@ class TestManualConcerts:
         assert entry['venue']      == ''
         assert entry['event_name'] == ''
 
+    def test_is_opener_defaults_to_false(self, cache):
+        cache.add_manual_concert('Headliner', '2026-08-01')
+        entry = cache.get_manual_concerts()[0]
+        assert entry['is_opener'] is False
+
+    def test_is_opener_stored_and_returned_as_bool(self, cache):
+        cache.add_manual_concert('Support Act', '2026-08-01', event_name='Big Show', is_opener=True)
+        entry = cache.get_manual_concerts()[0]
+        assert entry['is_opener'] is True
+
     def test_ordered_by_date(self, cache):
         cache.add_manual_concert('Artist B', '2026-09-01')
         cache.add_manual_concert('Artist A', '2026-07-01')
