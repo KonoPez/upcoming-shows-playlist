@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sources.models import Track
-from sources.setlist import SetlistClient, _parse_setlist_date, MAX_SHOWS
+from sources.setlist import SetlistClient, _parse_setlist_date, MAX_SHOWS, MAX_SPREAD_DAYS
 from playlist_logic.scoring import SETLIST_W, RECENCY_W, NOVELTY_W, score_track, select_tracks_for_artist
 
 
@@ -96,18 +96,74 @@ class TestSetlistClient:
         # frequency = MAX_SHOWS / MAX_SHOWS = 1.0, not inflated by extra shows
         assert abs(result['song'] - 1.0) < 1e-9
 
-    def test_excludes_shows_older_than_one_year(self):
-        old_setlist = _make_setlist(['Old Song'], days_ago=400)
-        recent_setlist = _make_setlist(['New Song'], days_ago=10)
+    def _scores(self, setlists: list[dict]) -> dict[str, float]:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {'setlist': [old_setlist, recent_setlist]}
+        mock_resp.json.return_value = {'setlist': setlists}
         mock_resp.raise_for_status.return_value = None
-
         with patch('sources.setlist.requests.get', return_value=mock_resp):
-            result = self._client().get_setlist_scores('Artist')
+            return self._client().get_setlist_scores('Artist')
 
+    # ── Age window: measured from the artist's latest show, not from today ────
+
+    def test_excludes_shows_far_older_than_the_latest_show(self):
+        result = self._scores([
+            _make_setlist(['Old Song'], days_ago=10 + MAX_SPREAD_DAYS + 1),
+            _make_setlist(['New Song'], days_ago=10),
+        ])
         assert 'old song' not in result
         assert 'new song' in result
+
+    def test_stale_tour_is_used_when_it_is_all_the_artist_has(self):
+        # Walter Etc.: last toured two years ago. Ten shows from that run are a
+        # better predictor than no signal at all, so the window follows them.
+        result = self._scores([
+            _make_setlist(['Gloom Cruise'], days_ago=730 + i * 3) for i in range(4)
+        ])
+        assert abs(result['gloom cruise'] - 1.0) < 1e-9   # 4/4 shows counted
+
+    def test_one_fresh_show_supersedes_a_stale_tour(self):
+        # As soon as they play again the anchor jumps forward, and the old run
+        # falls outside the window — one current show beats ten ancient ones.
+        result = self._scores(
+            [_make_setlist(['New Opener'], days_ago=2)]
+            + [_make_setlist(['Old Staple'], days_ago=730 + i * 3) for i in range(10)]
+        )
+        assert result == {'new opener': 1.0}
+
+    def test_window_is_relative_so_a_stale_tour_still_drops_its_own_oldest(self):
+        # Anchor is the newest stale show; anything a further MAX_SPREAD_DAYS
+        # back is still excluded even though nothing here is recent.
+        result = self._scores([
+            _make_setlist(['Kept'], days_ago=730),
+            _make_setlist(['Dropped'], days_ago=730 + MAX_SPREAD_DAYS + 1),
+        ])
+        assert 'kept' in result
+        assert 'dropped' not in result
+
+    def test_out_of_order_response_still_anchors_on_newest(self):
+        # Do not rely on setlist.fm returning results newest-first.
+        result = self._scores([
+            _make_setlist(['Old Song'], days_ago=10 + MAX_SPREAD_DAYS + 1),
+            _make_setlist(['New Song'], days_ago=1),
+            _make_setlist(['Mid Song'], days_ago=30),
+        ])
+        assert set(result) == {'new song', 'mid song'}
+
+    def test_undated_shows_do_not_become_the_anchor(self):
+        undated = _make_setlist(['Ghost Song'], days_ago=1)
+        undated['eventDate'] = 'not-a-date'
+        result = self._scores([undated, _make_setlist(['Real Song'], days_ago=5)])
+        assert result == {'real song': 1.0}
+
+    def test_songless_show_does_not_become_the_anchor(self):
+        # A show with no setlist entered yet must not drag the window forward
+        # and exclude the real data behind it.
+        blank = _make_setlist([], days_ago=1)
+        result = self._scores([
+            blank,
+            _make_setlist(['Real Song'], days_ago=10 + MAX_SPREAD_DAYS),
+        ])
+        assert result == {'real song': 1.0}
 
     def test_song_played_twice_in_show_counts_twice(self):
         # A song appearing twice (e.g. encore repeat) counts both appearances —

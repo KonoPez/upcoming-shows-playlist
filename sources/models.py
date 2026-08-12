@@ -33,6 +33,7 @@ class Track:
     duration_ms: int
     album_id: str
     album_name: str
+    album_type: str = 'album'   # Spotify album_type: 'album' | 'single' | 'compilation'
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -47,6 +48,7 @@ class Track:
             duration_ms=d.get('duration_ms', 0),
             album_id=d.get('album_id', ''),
             album_name=d.get('album_name', ''),
+            album_type=d.get('album_type', 'album'),
         )
 
 

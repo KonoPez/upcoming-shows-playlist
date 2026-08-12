@@ -16,6 +16,7 @@ from sources.models import Track, normalize_track_name
 logger = logging.getLogger(__name__)
 
 ARTIST_TRACKS_TTL = 30 * 24 * 3600   # 30 days — discographies don't change fast
+ARTIST_NAME_TTL = 90 * 24 * 3600     # 90 days — canonical names change about as often as IDs
 FAMILIARITY_TTL = 6 * 3600            # 6 hours — top tracks don't shift meaningfully intra-day
 RECENTLY_PLAYED_TTL = 5 * 60          # 5 min — deduplicates the two callers within a single run
 API_DELAY = 0.1                        # 100 ms between calls
@@ -44,6 +45,34 @@ _VARIANT_TRACK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Which release a song should be taken from when it appears on several.  The
+# album version is the canonical one: pre-release singles are frequently
+# different mixes/edits, and a song's presence on the album is what the artist
+# treats as the finished record.  Compilations sit in the middle — usually the
+# album master, but a second-hand pressing.  Unknown types sort last.
+# Note Spotify types EPs as 'single', so EPs rank alongside singles.
+_ALBUM_TYPE_RANK = {'album': 3, 'compilation': 2, 'single': 1}
+
+
+def album_type_rank(album_type: str) -> int:
+    """Higher is better. See _ALBUM_TYPE_RANK."""
+    return _ALBUM_TYPE_RANK.get((album_type or '').strip().lower(), 0)
+
+
+def pad_release_date(release_date: str) -> str:
+    """
+    Pad a Spotify release_date to YYYY-MM-DD so string comparison is chronological.
+
+    Spotify returns year-, month-, or day-precision dates.  Compared raw, "2020"
+    sorts before "2020-01-01" even though they denote the same release, so any
+    "which came first" test needs the padded form.
+    """
+    rd = release_date or '0000'
+    if len(rd) == 4:
+        return rd + '-01-01'
+    if len(rd) == 7:
+        return rd + '-01'
+    return rd
 
 
 def deduplicate_tracks(
@@ -55,14 +84,17 @@ def deduplicate_tracks(
 
     Within each group the representative is chosen by priority:
       1. Exactly one non-variant exists → use it.
-      2. Otherwise (multiple non-variants, or all variants) → highest Last.fm
-         score. Note this looks Last.fm up by the *literal* track name, not the
-         normalized group key, so it only distinguishes candidates in the rare
-         case where a candidate's exact title is itself a Last.fm top track
-         (e.g. a well-known live/variant recording when no studio version
-         exists). When candidates share a base name they score equally here.
-      3. Last.fm unavailable or all tied (the common case) → shortest track title.
-      4. Still tied → first in the list (albums are newest-first, so this
+      2. Otherwise (multiple non-variants, or all variants) → the best release
+         type: album over compilation over single, so the album cut of a song
+         beats the pre-release single that shares its name.
+      3. Tied on release type → highest Last.fm score. Note this looks Last.fm
+         up by the *literal* track name, not the normalized group key, so it
+         only distinguishes candidates in the rare case where a candidate's
+         exact title is itself a Last.fm top track (e.g. a well-known
+         live/variant recording when no studio version exists). When candidates
+         share a base name they score equally here.
+      4. Last.fm unavailable or all tied (the common case) → shortest track title.
+      5. Still tied → first in the list (albums are newest-first, so this
          naturally favours the more recent pressing).
     """
     groups: dict[str, list[Track]] = defaultdict(list)
@@ -86,6 +118,11 @@ def deduplicate_tracks(
 
         # Prefer non-variants when multiple exist; fall back to all if none exist.
         candidates = non_variants if non_variants else group
+
+        # Album cut beats single/EP cut. Applied before the weaker tiebreaks
+        # below, which can't tell an album version from a pre-release single.
+        best_rank = max(album_type_rank(t.album_type) for t in candidates)
+        candidates = [t for t in candidates if album_type_rank(t.album_type) == best_rank]
 
         if lastfm_scores and len(candidates) > 1:
             best_score = max(lastfm_scores.get(t.name.lower().strip(), 0.0) for t in candidates)
@@ -332,11 +369,47 @@ class SpotifyClient:
                 })
         return plays
 
+    def get_artist_names(self, artist_ids: list[str], cache: Cache) -> dict[str, str]:
+        """
+        Return {artist_id: canonical Spotify name} for the given IDs.
+
+        Calendar titles spell artists however the venue felt like it, and the
+        third-party APIs (setlist.fm, Last.fm) index by the canonical name, so
+        downstream lookups need this rather than the string we searched with.
+
+        One request per artist — the batch `artists?ids=` endpoint returns 403
+        for PKCE apps.  Each name is cached for ARTIST_NAME_TTL, so this costs
+        a call only for artists seen for the first time in 90 days.
+        """
+        names: dict[str, str] = {}
+
+        for artist_id in artist_ids:
+            cache_key = f'artist_name:{artist_id}'
+            cached = cache.get(cache_key)
+            if cached is not None:
+                names[artist_id] = cached
+                continue
+
+            try:
+                name = (self.sp.artist(artist_id) or {}).get('name')
+                time.sleep(API_DELAY)
+            except Exception as e:
+                logger.debug(f'Failed to fetch canonical name for {artist_id}: {e}')
+                continue
+
+            if name:
+                names[artist_id] = name
+                cache.set(cache_key, name, ARTIST_NAME_TTL)
+
+        return names
+
     # ── Artist discography ────────────────────────────────────────────────────
 
     def get_artist_tracks(self, artist_id: str, cache: Cache) -> list[Track]:
         """Return tracks for an artist's discography. Cached for ARTIST_TRACKS_TTL."""
-        cache_key = f'artist_tracks:{artist_id}'
+        # v2: entries cached before album_type existed picked the single's copy
+        # of a song over the album's, so they must be refetched rather than aged out.
+        cache_key = f'artist_tracks:v2:{artist_id}'
         cached = cache.get(cache_key)
         if cached is not None:
             return [Track.from_dict(t) for t in cached]
@@ -358,17 +431,29 @@ class SpotifyClient:
         if not albums:
             return []
 
-        # Collect studio and variant tracks separately, each deduped by base name
-        # keeping the OLDEST version per category so a later re-recording can't
-        # silently overwrite the original. deduplicate_tracks() picks between them.
-        studio_by_name: dict[str, Track] = {}   # base_name → oldest non-variant
-        variant_by_name: dict[str, Track] = {}  # base_name → oldest variant
+        # Collect studio and variant tracks separately, each deduped by base name.
+        # Within a category the album cut wins over a single/EP cut; between two
+        # releases of the same type the OLDEST wins, so a later re-recording
+        # can't silently overwrite the original or inflate its recency score.
+        # deduplicate_tracks() then picks between the two categories.
+        studio_by_name: dict[str, Track] = {}   # base_name → best non-variant
+        variant_by_name: dict[str, Track] = {}  # base_name → best variant
+
+        def is_better(candidate: Track, incumbent: Track) -> bool:
+            cand_rank = album_type_rank(candidate.album_type)
+            inc_rank = album_type_rank(incumbent.album_type)
+            if cand_rank != inc_rank:
+                return cand_rank > inc_rank
+            return pad_release_date(candidate.release_date) < pad_release_date(
+                incumbent.release_date
+            )
 
         for album in albums:
             album_id = album['id']
             album_name = album.get('name', '')
             release_date = album.get('release_date', '')
             release_date_precision = album.get('release_date_precision', 'year')
+            album_type = album.get('album_type', '')
 
             for track in self._get_album_tracks(album_id):
                 tid = track.get('id')
@@ -380,11 +465,7 @@ class SpotifyClient:
                 base = normalize_track_name(track_name)
                 target = variant_by_name if is_variant else studio_by_name
 
-                existing = target.get(base)
-                if existing and existing.release_date <= release_date:
-                    continue
-
-                target[base] = Track(
+                candidate = Track(
                     id=tid,
                     name=track_name,
                     duration_ms=track.get('duration_ms', 0),
@@ -392,7 +473,14 @@ class SpotifyClient:
                     album_name=album_name,
                     release_date=release_date,
                     release_date_precision=release_date_precision,
+                    album_type=album_type,
                 )
+
+                existing = target.get(base)
+                if existing and not is_better(candidate, existing):
+                    continue
+
+                target[base] = candidate
 
         all_tracks = list(studio_by_name.values()) + list(variant_by_name.values())
         if not all_tracks:
@@ -451,29 +539,27 @@ class SpotifyClient:
 
         # Sort newest-first, deduplicate by normalised name (avoid remaster dupes)
         def sort_key(a: dict) -> str:
-            rd = a.get('release_date', '0000')
-            if len(rd) == 4:
-                rd += '-01-01'
-            elif len(rd) == 7:
-                rd += '-01'
-            return rd
+            return pad_release_date(a.get('release_date', ''))
 
         albums.sort(key=sort_key, reverse=True)
 
         # Dedup by normalised name (strips "(Deluxe)", "(Live)", etc.). On a
-        # collision a non-variant beats a variant so a later live/acoustic
-        # re-release can't displace the studio original; else newest wins.
+        # collision the preferred release wins even if older: a non-variant over
+        # a live/acoustic re-release, then an album over a same-named single
+        # (artists routinely release the title track as a single first).
+        # Otherwise newest wins, since the list is already newest-first.
         def _is_variant_album(a: dict) -> bool:
             return bool(_VARIANT_ALBUM_RE.search(a.get('name', '')))
+
+        def _preference(a: dict) -> tuple[bool, int]:
+            return (not _is_variant_album(a), album_type_rank(a.get('album_type', '')))
 
         chosen: dict[str, dict] = {}
         for a in albums:
             norm = a.get('name', '').lower().split('(')[0].strip()
             existing = chosen.get(norm)
-            if existing is None:
+            if existing is None or _preference(a) > _preference(existing):
                 chosen[norm] = a
-            elif _is_variant_album(existing) and not _is_variant_album(a):
-                chosen[norm] = a   # non-variant displaces variant, even if older
 
         return sorted(chosen.values(), key=sort_key, reverse=True)[:MAX_ALBUMS_PER_ARTIST]
 

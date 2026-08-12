@@ -6,7 +6,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from spotify_client.client import SpotifyClient, deduplicate_tracks
+from spotify_client.client import (
+    SpotifyClient,
+    album_type_rank,
+    deduplicate_tracks,
+    pad_release_date,
+)
 from sources.models import Track
 
 
@@ -23,6 +28,7 @@ def make_track(
     duration_ms=200000,
     album_id='alb1',
     album_name='Studio Album',
+    album_type='album',
 ) -> Track:
     return Track(
         id=id,
@@ -32,6 +38,7 @@ def make_track(
         duration_ms=duration_ms,
         album_id=album_id,
         album_name=album_name,
+        album_type=album_type,
     )
 
 
@@ -261,6 +268,102 @@ class TestDeduplicateTracks:
         # Equal-length titles tie, so the first in the list wins.
         assert result[0].id == 'a'
 
+    # ── Album version beats single version ────────────────────────────────────
+
+    def test_album_version_beats_single_version(self):
+        # Combat's "Stay Golden" shipped on the single "Epic Season Finale" a
+        # month before the album of the same name. The album cut is canonical.
+        single = make_track(
+            id='single', name='Stay Golden',
+            album_name='Epic Season Finale', album_type='single',
+            release_date='2024-07-16',
+        )
+        album = make_track(
+            id='album', name='Stay Golden',
+            album_name='Stay Golden', album_type='album',
+            release_date='2024-08-16',
+        )
+        result = deduplicate_tracks([single, album])
+        assert [t.id for t in result] == ['album']
+
+    def test_album_version_beats_compilation_version(self):
+        comp = make_track(id='comp', name='Song', album_type='compilation')
+        album = make_track(id='album', name='Song', album_type='album')
+        result = deduplicate_tracks([comp, album])
+        assert [t.id for t in result] == ['album']
+
+    def test_album_type_outranks_lastfm_tiebreak(self):
+        # No studio cut exists, so both candidates are variants. The Last.fm
+        # score would pick the single's, but release type narrows the field
+        # before Last.fm is consulted.
+        single = make_track(
+            id='single', name='Song (Live)',
+            album_name='Live at the Roxy', album_type='single',
+        )
+        album = make_track(
+            id='album', name='Song (Live at Wembley)',
+            album_name='Live at Wembley', album_type='album',
+        )
+        lastfm_scores = {'song (live)': 9.0}
+        result = deduplicate_tracks([single, album], lastfm_scores=lastfm_scores)
+        assert [t.id for t in result] == ['album']
+
+    def test_all_singles_group_still_falls_back_to_existing_tiebreaks(self):
+        # No album pressing exists — ranks tie, so shortest title decides.
+        a = make_track(
+            id='a', name='Song (Live at the Greek Theatre)',
+            album_name='Live at the Greek Theatre', album_type='single',
+        )
+        b = make_track(
+            id='b', name='Song (Live)', album_name='Live at X', album_type='single'
+        )
+        result = deduplicate_tracks([a, b])
+        assert [t.id for t in result] == ['b']
+
+    def test_studio_single_still_beats_live_album_cut(self):
+        # Release type is only consulted among candidates that survive the
+        # variant filter, so an album's live cut can't outrank a studio single.
+        live = make_track(
+            id='live', name='Song (Live)', album_name='Album', album_type='album'
+        )
+        studio_single = make_track(id='single', name='Song', album_type='single')
+        result = deduplicate_tracks([live, studio_single])
+        assert [t.id for t in result] == ['single']
+
+
+class TestAlbumTypeRank:
+    def test_ordering(self):
+        assert (
+            album_type_rank('album')
+            > album_type_rank('compilation')
+            > album_type_rank('single')
+            > album_type_rank('')
+        )
+
+    def test_case_and_whitespace_insensitive(self):
+        assert album_type_rank(' Album ') == album_type_rank('album')
+
+    def test_unknown_type_ranks_last(self):
+        assert album_type_rank('mixtape') == 0
+
+
+class TestPadReleaseDate:
+    def test_year_precision_padded(self):
+        assert pad_release_date('2020') == '2020-01-01'
+
+    def test_month_precision_padded(self):
+        assert pad_release_date('2020-06') == '2020-06-01'
+
+    def test_day_precision_unchanged(self):
+        assert pad_release_date('2020-06-15') == '2020-06-15'
+
+    def test_year_precision_compares_as_same_day_not_earlier(self):
+        # Raw string compare would rank "2020" before "2020-01-01"
+        assert pad_release_date('2020') == pad_release_date('2020-01-01')
+
+    def test_empty_sorts_first(self):
+        assert pad_release_date('') < pad_release_date('1900')
+
 
 class TestGetArtistAlbums:
     def test_non_variant_beats_newer_variant(self, client):
@@ -307,6 +410,35 @@ class TestGetArtistAlbums:
         assert len(result) == 1
         assert result[0]['id'] == 'deluxe'
 
+    def test_album_beats_newer_same_named_single(self, client):
+        # Title tracks are routinely released as a single ahead of the album.
+        client.sp._get.return_value = {
+            'items': [
+                {'id': 'sgl', 'name': 'Stay Golden', 'release_date': '2024-09-01',
+                 'release_date_precision': 'day', 'album_type': 'single'},
+                {'id': 'alb', 'name': 'Stay Golden', 'release_date': '2024-08-16',
+                 'release_date_precision': 'day', 'album_type': 'album'},
+            ],
+            'next': None,
+        }
+        result = client._get_artist_albums('artist1')
+        assert [a['id'] for a in result] == ['alb']
+
+    def test_differently_named_single_is_kept_alongside_the_album(self, client):
+        # Only same-name collisions collapse; a separate single stays in the
+        # pool so its non-album tracks are still reachable.
+        client.sp._get.return_value = {
+            'items': [
+                {'id': 'alb', 'name': 'Stay Golden', 'release_date': '2024-08-16',
+                 'release_date_precision': 'day', 'album_type': 'album'},
+                {'id': 'sgl', 'name': 'Epic Season Finale', 'release_date': '2024-07-16',
+                 'release_date_precision': 'day', 'album_type': 'single'},
+            ],
+            'next': None,
+        }
+        result = client._get_artist_albums('artist1')
+        assert {a['id'] for a in result} == {'alb', 'sgl'}
+
 
 class TestFetchArtistTracks:
     def test_oldest_studio_version_wins_on_name_collision(self, client):
@@ -352,3 +484,108 @@ class TestFetchArtistTracks:
         assert by_id['t_studio'].album_name == 'Studio Album'
         assert by_id['t_live'].album_name == 'Live at Wembley'
 
+    def test_album_cut_beats_older_single_cut(self, client):
+        # Regression: oldest-wins alone handed the song to the pre-release
+        # single. Release type is checked first, date only breaks ties.
+        client._get_artist_albums = MagicMock(return_value=[
+            {'id': 'alb', 'name': 'Stay Golden', 'release_date': '2024-08-16',
+             'release_date_precision': 'day', 'album_type': 'album'},
+            {'id': 'sgl', 'name': 'Epic Season Finale', 'release_date': '2024-07-16',
+             'release_date_precision': 'day', 'album_type': 'single'},
+        ])
+
+        def fake_get_album_tracks(album_id):
+            return {
+                'alb': [{'id': 't_album', 'name': 'Stay Golden', 'duration_ms': 118595}],
+                'sgl': [{'id': 't_single', 'name': 'Stay Golden', 'duration_ms': 118595}],
+            }.get(album_id, [])
+
+        client._get_album_tracks = MagicMock(side_effect=fake_get_album_tracks)
+
+        result = client._fetch_artist_tracks('artist1')
+        assert len(result) == 1
+        assert result[0].id == 't_album'
+        assert result[0].album_name == 'Stay Golden'
+        assert result[0].album_type == 'album'
+
+    def test_oldest_wins_within_the_same_release_type(self, client):
+        # The anti-re-recording rule survives: same type → older pressing wins.
+        client._get_artist_albums = MagicMock(return_value=[
+            {'id': 'alb_new', 'name': 'Rerecorded', 'release_date': '2023-01-01',
+             'release_date_precision': 'day', 'album_type': 'album'},
+            {'id': 'alb_old', 'name': 'Original', 'release_date': '2008-01-01',
+             'release_date_precision': 'day', 'album_type': 'album'},
+        ])
+
+        def fake_get_album_tracks(album_id):
+            return {
+                'alb_new': [{'id': 't_new', 'name': 'Song', 'duration_ms': 1000}],
+                'alb_old': [{'id': 't_old', 'name': 'Song', 'duration_ms': 1000}],
+            }.get(album_id, [])
+
+        client._get_album_tracks = MagicMock(side_effect=fake_get_album_tracks)
+
+        result = client._fetch_artist_tracks('artist1')
+        assert [t.id for t in result] == ['t_old']
+
+    def test_year_precision_album_not_treated_as_older_than_same_year_album(self, client):
+        # "2020" vs "2020-01-01" denote the same release date; raw string
+        # compare would call the year-precision one older and let it win.
+        client._get_artist_albums = MagicMock(return_value=[
+            {'id': 'day_prec', 'name': 'A', 'release_date': '2020-01-01',
+             'release_date_precision': 'day', 'album_type': 'album'},
+            {'id': 'year_prec', 'name': 'B', 'release_date': '2020',
+             'release_date_precision': 'year', 'album_type': 'album'},
+        ])
+
+        def fake_get_album_tracks(album_id):
+            return {
+                'day_prec': [{'id': 't_day', 'name': 'Song', 'duration_ms': 1000}],
+                'year_prec': [{'id': 't_year', 'name': 'Song', 'duration_ms': 1000}],
+            }.get(album_id, [])
+
+        client._get_album_tracks = MagicMock(side_effect=fake_get_album_tracks)
+
+        result = client._fetch_artist_tracks('artist1')
+        # Tie on both type and padded date → first seen wins, not the year-precision one
+        assert [t.id for t in result] == ['t_day']
+
+
+
+# ── get_artist_names ──────────────────────────────────────────────────────────
+
+@pytest.fixture
+def cache(tmp_path):
+    from cache import Cache
+    return Cache(db_path=tmp_path / 'test.db')
+
+
+class TestGetArtistNames:
+    def test_returns_canonical_names(self, client, cache):
+        client.sp.artist.side_effect = lambda aid: {
+            'a1': {'id': 'a1', 'name': 'Prince Daddy & the Hyena'},
+            'a2': {'id': 'a2', 'name': 'Walter Etc.'},
+        }[aid]
+
+        assert client.get_artist_names(['a1', 'a2'], cache) == {
+            'a1': 'Prince Daddy & the Hyena',
+            'a2': 'Walter Etc.',
+        }
+
+    def test_second_call_is_served_from_cache(self, client, cache):
+        client.sp.artist.return_value = {'id': 'a1', 'name': 'Combat'}
+
+        client.get_artist_names(['a1'], cache)
+        client.get_artist_names(['a1'], cache)
+
+        assert client.sp.artist.call_count == 1
+
+    def test_failed_lookup_is_omitted_not_cached(self, client, cache):
+        client.sp.artist.side_effect = Exception('403 Forbidden')
+
+        assert client.get_artist_names(['a1'], cache) == {}
+
+        # A later run must retry rather than inherit the failure
+        client.sp.artist.side_effect = None
+        client.sp.artist.return_value = {'id': 'a1', 'name': 'Combat'}
+        assert client.get_artist_names(['a1'], cache) == {'a1': 'Combat'}

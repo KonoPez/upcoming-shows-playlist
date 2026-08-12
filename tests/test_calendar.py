@@ -148,6 +148,24 @@ class TestGoogleCalendarParse:
         result = self.client._parse(evt, START, END)
         assert all(c.event_name == 'Radiohead w/ Portishead @ MSG' for c in result)
 
+    def test_first_artist_is_headliner_rest_are_openers(self):
+        # Bills are written headliner-first, so only position 0 earns the
+        # HEADLINER_BONUS in compute_artist_weights.
+        evt = _gcal_component(
+            'Prince Daddy and the Hyena w/ Combat and Walter Etc. @ Majestic',
+            dtstart=date(2024, 7, 1),
+        )
+        result = self.client._parse(evt, START, END)
+        assert [(c.artist_name, c.is_opener) for c in result] == [
+            ('Prince Daddy and the Hyena', False),
+            ('Combat', True),
+            ('Walter Etc.', True),
+        ]
+
+    def test_single_artist_is_not_an_opener(self):
+        evt = _gcal_component('Radiohead @ MSG', dtstart=date(2024, 7, 1))
+        assert self.client._parse(evt, START, END)[0].is_opener is False
+
     def test_concert_keyword_in_description_passes_filter(self):
         evt = _gcal_component('Local Band', description='live concert tonight', dtstart=date(2024, 7, 1))
         assert len(self.client._parse(evt, START, END)) == 1
@@ -284,6 +302,19 @@ class TestAppleCalendarParse:
         evt = _apple_event('Radiohead w/ Portishead @ MSG', dtstart=date(2024, 7, 1))
         result = self.client._parse(evt)
         assert all(c.event_name == 'Radiohead w/ Portishead @ MSG' for c in result)
+
+    def test_first_artist_is_headliner_rest_are_openers(self):
+        evt = _apple_event('Radiohead w/ Portishead & Mogwai @ MSG', dtstart=date(2024, 7, 1))
+        result = self.client._parse(evt)
+        assert [(c.artist_name, c.is_opener) for c in result] == [
+            ('Radiohead', False),
+            ('Portishead', True),
+            ('Mogwai', True),
+        ]
+
+    def test_single_artist_is_not_an_opener(self):
+        evt = _apple_event('Radiohead @ MSG', dtstart=date(2024, 7, 1))
+        assert self.client._parse(evt)[0].is_opener is False
 
     def test_unrecognised_dtstart_type_returns_empty(self):
         # dtstart.value that is neither date nor datetime → _parse returns []

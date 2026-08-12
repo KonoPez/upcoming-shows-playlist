@@ -117,6 +117,9 @@ class AppleCalendarClient:
                 str(vevent.location.value) if hasattr(vevent, 'location') else 'Unknown Venue'
             )
 
+            # Bills are written headliner-first ("Headliner w/ Support1, Support2"),
+            # so everything after the first name is a supporting act. Same
+            # convention TicketmasterClient.get_local_events uses for attractions.
             return [
                 Concert(
                     event_name=summary,
@@ -124,8 +127,9 @@ class AppleCalendarClient:
                     event_date=event_date,
                     venue=location,
                     source='apple_calendar',
+                    is_opener=(i > 0),
                 )
-                for name in split_artist_names(artist_string)
+                for i, name in enumerate(split_artist_names(artist_string))
             ]
         except Exception as e:
             logger.debug(f'Failed to parse Apple Calendar event: {e}')

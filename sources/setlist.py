@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = 'https://api.setlist.fm/rest/1.0'
 SETLIST_TTL = 7 * 24 * 3600   # 7 days — lineups are stable week-to-week
 MAX_SHOWS = 10                  # shows to sample per artist
-MAX_AGE_DAYS = 365              # ignore shows older than 1 year
+MAX_SPREAD_DAYS = 365           # ignore shows this much older than the artist's latest show
 
 
 def _parse_setlist_date(date_str: str) -> Optional[date]:
@@ -49,8 +49,8 @@ class SetlistClient:
         Return {normalized_track_name: frequency_score} for an artist.
 
         frequency_score = appearances across sampled shows / shows_analyzed.
-        Covers up to MAX_SHOWS shows within the past MAX_AGE_DAYS days.
-        Results are cached for SETLIST_TTL seconds.
+        Covers up to MAX_SHOWS shows within MAX_SPREAD_DAYS of the artist's
+        most recent show. Results are cached for SETLIST_TTL seconds.
         """
         cache_key = f'setlist:{artist_name.lower().strip()}'
         cached = self.cache.get(cache_key)
@@ -63,8 +63,6 @@ class SetlistClient:
         return scores
 
     def _fetch_setlist_scores(self, artist_name: str) -> dict[str, float]:
-        cutoff = date.today() - timedelta(days=MAX_AGE_DAYS)
-
         time.sleep(1.0)
         try:
             resp = requests.get(
@@ -83,34 +81,45 @@ class SetlistClient:
             logger.debug(f'Setlist.fm: no setlists found for "{artist_name}"')
             return {}
 
-        counts: dict[str, int] = {}
-        shows_analyzed = 0
-
+        # Collect every usable show first — the age window is measured from the
+        # artist's own latest show, not from today, so it can't be applied until
+        # that show is known.
+        shows: list[tuple[date, list[str]]] = []
         for sl in setlists:
-            if shows_analyzed >= MAX_SHOWS:
-                break
-
             event_date = _parse_setlist_date(sl.get('eventDate', ''))
-            if not event_date or event_date < cutoff:
+            if not event_date:
                 continue
 
             songs = [
-                song.get('name', '')
+                song['name'].lower().strip()
                 for s in sl.get('sets', {}).get('set', [])
                 for song in s.get('song', [])
-                if song.get('name')
+                if song.get('name') and song['name'].strip()
             ]
             if not songs:
                 continue   # skip shows with no setlist data entered yet
 
-            shows_analyzed += 1
-            for name in songs:
-                key = name.lower().strip()
-                if key:
-                    counts[key] = counts.get(key, 0) + 1
+            shows.append((event_date, songs))
 
-        if shows_analyzed == 0:
+        if not shows:
             return {}
+
+        # An artist who last toured two years ago still tells us more than no
+        # data at all, so there is no absolute age floor. But once they play
+        # again, that one fresh show supersedes the whole older run: the anchor
+        # moves forward and the stale shows drop out of the window.
+        shows.sort(key=lambda s: s[0], reverse=True)
+        cutoff = shows[0][0] - timedelta(days=MAX_SPREAD_DAYS)
+
+        counts: dict[str, int] = {}
+        shows_analyzed = 0
+        for event_date, songs in shows:
+            if shows_analyzed >= MAX_SHOWS or event_date < cutoff:
+                break
+
+            shows_analyzed += 1
+            for key in songs:
+                counts[key] = counts.get(key, 0) + 1
 
         scores = {title: count / shows_analyzed for title, count in counts.items()}
         logger.debug(

@@ -289,6 +289,22 @@ def cmd_status() -> None:
     print(f'\n{len(concerts)} concerts · {len(unique_artists)} unique artists')
 
 
+def _apply_canonical_names(artists: dict, sp: 'SpotifyClient', cache: 'Cache') -> None:
+    """
+    Replace each resolved artist's calendar-derived name with Spotify's own.
+
+    setlist.fm and Last.fm index by canonical name, so a venue spelling like
+    "Prince Daddy and the Hyena" (Spotify and setlist.fm both say "&") silently
+    loses those signals.  Falls back to the calendar name if the lookup fails.
+    """
+    canonical = sp.get_artist_names(list(artists), cache)
+    for artist_id, artist in artists.items():
+        name = canonical.get(artist_id)
+        if name and name != artist.name:
+            logger.debug(f'Canonical name: "{artist.name}" → "{name}"')
+            artist.name = name
+
+
 # ── Core playlist build ───────────────────────────────────────────────────────
 
 def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
@@ -354,6 +370,8 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     if not artists:
         logger.warning('No artists could be resolved to Spotify profiles.')
         return
+
+    _apply_canonical_names(artists, sp, cache)
 
     # 5. Compute weights and allocate duration budgets
     weights = compute_artist_weights({a_id: a.concerts for a_id, a in artists.items()}, today)
@@ -920,6 +938,10 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
         return
 
     artists = {aid: artists[aid] for aid in selected_ids}
+
+    # Canonicalise only the survivors — one API call each, and the candidate
+    # pool upstream can run to several hundred artists.
+    _apply_canonical_names(artists, sp, cache)
 
     # 12. Allocate duration budgets weighted by enjoyment × proximity
     weights = compute_discovery_weights(artists, enjoyment_scores, today)

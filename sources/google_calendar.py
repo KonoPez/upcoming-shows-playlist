@@ -75,6 +75,9 @@ class GoogleCalendarClient:
 
             location = str(component.get('LOCATION', 'Unknown Venue'))
 
+            # Bills are written headliner-first ("Headliner w/ Support1, Support2"),
+            # so everything after the first name is a supporting act. Same
+            # convention TicketmasterClient.get_local_events uses for attractions.
             return [
                 Concert(
                     event_name=summary,
@@ -82,8 +85,9 @@ class GoogleCalendarClient:
                     event_date=event_date,
                     venue=location,
                     source='google_calendar',
+                    is_opener=(i > 0),
                 )
-                for name in split_artist_names(artist_string)
+                for i, name in enumerate(split_artist_names(artist_string))
             ]
         except Exception as e:
             logger.debug(f'Failed to parse Google Calendar event: {e}')

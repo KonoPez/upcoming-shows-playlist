@@ -22,6 +22,10 @@ RESOLUTION_TTL = 90 * 24 * 3600    # 90 days — artist IDs rarely change
 UNRESOLVED_TTL  =  1 * 24 * 3600   # 1 day  — retry failures quickly after bug fixes
 UNRESOLVED_SENTINEL = '__UNRESOLVED__'
 
+# A bare "&"/"and" acting as a list separator. "and the …" is excluded because
+# that shape is almost always part of a band name, not a boundary between acts.
+_CONJUNCTION = r'\s+(?:&|and)\s+(?!the\s)'
+
 
 # ── Name normalisation ───────────────────────────────────────────────────────
 
@@ -30,7 +34,8 @@ def _normalize(name: str) -> str:
     name = name.lower().strip()
     name = re.sub(r'^the\s+', '', name)
     name = re.sub(r'\s*\([^)]*\)', '', name)          # remove parentheticals
-    name = re.sub(r'\s+(&|and)\s+(the\s+)?band$', '', name)
+    name = re.sub(r'\s*&\s*', ' and ', name)          # "A & B" and "A and B" are the same act
+    name = re.sub(r'\s+and\s+(the\s+)?band$', '', name)
     name = re.sub(r'[^\w\s]', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip()
     return name
@@ -139,6 +144,7 @@ def split_artist_names(artist_string: str) -> list[str]:
       "Artist1, Artist2 & Artist3"  (comma + & together → clear list)
       "Artist1, Artist2, Artist3"   (multiple commas → clear list)
       "Artist1 feat. Artist2"
+      "Headliner w/ Support1 and Support2"  (w/ opens a support list)
 
     Returns a single-element list when the pattern is ambiguous:
       "Black Country, New Road"  — single comma, no & → kept intact
@@ -147,7 +153,13 @@ def split_artist_names(artist_string: str) -> list[str]:
     The rule for bare comma/& splitting: only split when ≥2 commas are
     present, or when a comma and a conjunction (&/and) appear together.
     Either pattern strongly implies a list rather than a band name.
-    w/ and feat. variants are always unambiguous and always split.
+    w/ and feat. variants are always unambiguous and always split, and
+    everything after them is a support list, where a bare conjunction is
+    a list separator rather than part of a band name.
+
+    A conjunction followed by "the" ("Prince Daddy and the Hyena",
+    "Florence and the Machine") is never treated as a separator — that
+    shape is overwhelmingly a single band name.
     """
     # Unambiguous separators: w/ and feat variants — always split on these
     parts = re.split(
@@ -157,16 +169,23 @@ def split_artist_names(artist_string: str) -> list[str]:
     )
 
     result: list[str] = []
-    for part in parts:
+    for index, part in enumerate(parts):
         part = part.strip()
         comma_count = part.count(',')
+        # Any conjunction signals list-ness ("A, B and the C" is still a list);
+        # only the separator-shaped ones are actually split on.
         has_conjunction = bool(re.search(r'\s+(?:&|and)\s+', part, re.IGNORECASE))
+        has_separator = bool(re.search(_CONJUNCTION, part, re.IGNORECASE))
+        # Anything after a w/ or feat. is an enumerated support slot, so a
+        # conjunction there continues the list ("w/ Combat and Walter Etc.").
+        in_support_list = index > 0
 
         # Only split on comma/& when the structure clearly indicates a list:
         # multiple commas ("A, B, C") or comma + conjunction ("A, B & C").
         # A single lone comma or lone & is treated as part of the band name.
-        if comma_count >= 2 or (comma_count >= 1 and has_conjunction):
-            sub = re.split(r'\s*,\s*|\s+(?:&|and)\s+', part, flags=re.IGNORECASE)
+        clear_list = comma_count >= 2 or (comma_count >= 1 and has_conjunction)
+        if clear_list or (in_support_list and has_separator):
+            sub = re.split(rf'\s*,\s*|{_CONJUNCTION}', part, flags=re.IGNORECASE)
             result.extend(s.strip() for s in sub if s.strip())
         else:
             result.append(part)

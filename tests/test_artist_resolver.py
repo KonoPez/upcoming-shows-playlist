@@ -221,6 +221,15 @@ class TestNormalize:
         # Commas are stripped so "Black Country, New Road" matches "black country new road"
         assert _normalize("Black Country, New Road") == "black country new road"
 
+    def test_ampersand_and_and_are_equivalent(self):
+        # Regression: the calendar spells it "and", Spotify spells it "&".
+        # Without this the 10/25 headliner never matched its search result.
+        assert (
+            _normalize("Prince Daddy and the Hyena")
+            == _normalize("Prince Daddy & the Hyena")
+            == "prince daddy and the hyena"
+        )
+
 
 # ── _search_spotify ────────────────────────────────────────────────────────────
 
@@ -435,6 +444,29 @@ class TestSplitArtistNames:
         assert artist_string == "Black Country, New Road"
         assert split_artist_names(artist_string) == ["Black Country, New Road"]
 
+    def test_and_the_band_name_kept_intact_after_w_slash(self):
+        # "and the …" is a band-name shape, so it survives even in a support list
+        assert split_artist_names("Headliner w/ Florence and the Machine") == [
+            "Headliner", "Florence and the Machine"
+        ]
+
+    # ── Support lists opened by w/ — bare conjunction is a separator ──────────
+
+    def test_w_slash_support_list_split_on_and(self):
+        # Regression: the 10/25 Majestic bill resolves to three artists.
+        # "w/" establishes a support list, so the bare "and" separates acts,
+        # while "and the" in the headliner name does not.
+        title = "Ticket: Prince Daddy and the Hyena w/ Combat and Walter Etc."
+        artist_string = extract_artist_from_calendar_title(title)
+        assert split_artist_names(artist_string) == [
+            "Prince Daddy and the Hyena", "Combat", "Walter Etc."
+        ]
+
+    def test_feat_support_list_split_on_ampersand(self):
+        assert split_artist_names("Headliner feat. Support1 & Support2") == [
+            "Headliner", "Support1", "Support2"
+        ]
+
     # ── Clear list: multiple commas ───────────────────────────────────────────
 
     def test_three_commas_split(self):
@@ -453,6 +485,12 @@ class TestSplitArtistNames:
     def test_comma_and_and_split(self):
         assert split_artist_names("Artist1, Artist2 and Artist3") == [
             "Artist1", "Artist2", "Artist3"
+        ]
+
+    def test_comma_list_splits_but_preserves_and_the_band_name(self):
+        # The comma marks the list boundary; "and the Bad Seeds" stays attached
+        assert split_artist_names("Artist1, Nick Cave and the Bad Seeds") == [
+            "Artist1", "Nick Cave and the Bad Seeds"
         ]
 
     # ── Mixed delimiters (four-artist concert bill) ───────────────────────────
