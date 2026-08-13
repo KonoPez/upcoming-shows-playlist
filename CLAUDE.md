@@ -36,7 +36,7 @@ python main.py --update --cron      # mark this run as cron-triggered in the run
 python -m pytest tests/ -v
 ```
 
-482 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
+487 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
 
 ## Project layout
 
@@ -132,7 +132,7 @@ On the first `--discover` run the user is asked for IP geolocation consent; the 
 
 **Last.fm integration** (`sources/lastfm.py`): `get_popularity_scores(artist_name)` fetches up to 50 top tracks via `artist.getTopTracks`; play counts are log-normalised relative to the artist's most-played track. `get_artist_listeners(artist_name)` fetches total listener count via `artist.getInfo` for use as a global popularity signal in discovery scoring; returns `None` if unavailable, caches `-1` as a sentinel so failed lookups aren't retried within the TTL. Both methods cache 7 days. In `--dry-run`/`--discover-dry-run` output, `sl` shows setlist frequency and `lf` shows Last.fm popularity score; `—` means no data for that track.
 
-**Prep playlist slot allocation** (see `playlist_logic/weighting.py`): Exponential decay with 21-day half-life. `allocate_slots` distributes a total duration budget (default 2 hours) proportionally across artists. Artists whose proportional share is below `min_tracks_per_artist × 3.5 min` are excluded. Hamilton's method distributes rounding so budgets sum to the target exactly. `select_tracks_for_artist` greedily fills each artist's time budget by score, stopping once the accumulated `duration_ms` reaches the artist's budget (rounding up to the last whole track).
+**Prep playlist slot allocation** (see `playlist_logic/weighting.py`): Exponential decay with 21-day half-life. `allocate_slots` distributes a total duration budget (default 2 hours) proportionally across artists. Artists whose proportional share is below `min_tracks_per_artist × 3.5 min` are excluded. Hamilton's method distributes rounding so budgets sum to the target exactly. `select_tracks_for_artist` greedily fills each artist's time budget by score, taking each next track only when doing so lands **closer** to the budget than stopping would (i.e. while remaining budget ≥ half the track's duration). Rounding to nearest rather than always up matters at the playlist level: stopping only once the budget is *exceeded* overshoots by up to a full track per artist — averaging half a track each, which compounded into 15+ minutes over a 2-hour target across ten artists. The first track is always taken regardless of budget, so an artist holding a slot is never dropped. Per-artist error is now signed rather than always positive, so it largely cancels across the playlist (measured: 137m → 123m against a 120m target).
 
 **Discovery artist scoring** (see `playlist_logic/discovery_weighting.py`):
 

@@ -143,12 +143,22 @@ def select_tracks_for_artist(
     selected: list[Track] = []
     total_ms = 0
     for _, t in scored:
-        if total_ms >= duration_budget_ms:
+        if t.album_id and album_counts.get(t.album_id, 0) >= max_per_album:
+            continue
+
+        # Round to nearest rather than always up: take this track only if doing
+        # so lands closer to the budget than stopping here would. Stopping as
+        # soon as the budget is *exceeded* overshoots by up to a full track per
+        # artist — averaging half a track each, that compounds into 15+ minutes
+        # over target across a full playlist. The first track is always taken so
+        # every artist holding a budget is represented.
+        remaining_ms = duration_budget_ms - total_ms
+        if selected and remaining_ms * 2 < t.duration_ms:
             break
-        if not t.album_id or album_counts.get(t.album_id, 0) < max_per_album:
-            selected.append(t)
-            total_ms += t.duration_ms
-            if t.album_id:
-                album_counts[t.album_id] = album_counts.get(t.album_id, 0) + 1
+
+        selected.append(t)
+        total_ms += t.duration_ms
+        if t.album_id:
+            album_counts[t.album_id] = album_counts.get(t.album_id, 0) + 1
 
     return selected

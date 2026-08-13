@@ -168,25 +168,49 @@ def _manual_concert(days_until: int, event_name: str = 'Manual Show', is_opener:
 
 
 class TestComputeArtistWeightsManual:
-    """Manual-source concerts use event-level normalization: all artists
-    sharing the same (event_date, event_name) collectively contribute exactly
-    one headliner's worth of weight, split proportionally by role."""
+    """Manual-source concerts carry no source-specific weighting: every
+    appearance is weighted by proximity and role exactly as a calendar or
+    Ticketmaster one is."""
 
     def test_single_manual_headliner_matches_non_manual_headliner(self):
         weights = compute_artist_weights({'a1': [_manual_concert(10)]}, _TODAY)
         assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
-    def test_festival_event_sums_to_one_headliners_worth(self):
-        # One event (same date + event_name), 1 headliner + 2 openers, all manual.
+    def test_manual_bill_matches_identical_calendar_bill(self):
+        # The same 1-headliner/2-opener bill, once manual and once from a
+        # calendar, must produce identical weights — source is not a signal.
+        bill = {'h': False, 'o1': True, 'o2': True}
+        manual = compute_artist_weights(
+            {aid: [_manual_concert(10, event_name='Fest', is_opener=op)]
+             for aid, op in bill.items()},
+            _TODAY,
+        )
+        calendar = compute_artist_weights(
+            {aid: [_concert(10, is_opener=op)] for aid, op in bill.items()},
+            _TODAY,
+        )
+        assert manual == calendar
+
+    def test_manual_bill_members_keep_full_per_concert_weight(self):
+        # One event (same date + event_name), 1 headliner + 2 openers, all
+        # manual. Sharing a bill must not shrink anyone's weight.
         weights = compute_artist_weights({
             'h':  [_manual_concert(10, event_name='Fest', is_opener=False)],
             'o1': [_manual_concert(10, event_name='Fest', is_opener=True)],
             'o2': [_manual_concert(10, event_name='Fest', is_opener=True)],
         }, _TODAY)
-        total = weights['h'] + weights['o1'] + weights['o2']
-        assert abs(total - concert_weight(10) * HEADLINER_BONUS) < 1e-9
-        assert weights['h'] > weights['o1']
-        assert weights['h'] > weights['o2']
+        assert abs(weights['h'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+        assert abs(weights['o1'] - concert_weight(10)) < 1e-9
+        assert abs(weights['o2'] - concert_weight(10)) < 1e-9
+
+    def test_sooner_manual_headliner_outweighs_later_calendar_headliner(self):
+        # A manual show 51 days out and a calendar show 61 days out: the
+        # sooner one must win, since proximity is the only thing separating them.
+        weights = compute_artist_weights({
+            'manual_hl':   [_manual_concert(51)],
+            'calendar_hl': [_concert(61)],
+        }, _TODAY)
+        assert weights['manual_hl'] > weights['calendar_hl']
 
     def test_separate_manual_events_do_not_dilute_each_other(self):
         # Two distinct events (different event_name) on the same day, each
@@ -459,6 +483,28 @@ class TestSelectTracksForArtist:
         selected = select_tracks_for_artist(tracks, 1 * _TRACK_MS, {}, {}, self.TODAY,
                                             lastfm_scores=lastfm)
         assert selected[0].id == 't2'
+
+    def test_does_not_overshoot_budget_by_a_whole_track(self):
+        # Budget of 5.4 tracks: the 6th track would overshoot by 0.6 of a track,
+        # while stopping at 5 undershoots by only 0.4 — so 5 is the closer fit.
+        selected = select_tracks_for_artist(
+            self._tracks(10), int(5.4 * _TRACK_MS), {}, {}, self.TODAY
+        )
+        assert len(selected) == 5
+
+    def test_takes_track_that_lands_closer_to_budget(self):
+        # Budget of 5.6 tracks: taking the 6th overshoots by 0.4 of a track,
+        # which is closer than stopping at 5 and undershooting by 0.6.
+        selected = select_tracks_for_artist(
+            self._tracks(10), int(5.6 * _TRACK_MS), {}, {}, self.TODAY
+        )
+        assert len(selected) == 6
+
+    def test_first_track_always_taken_despite_tiny_budget(self):
+        # A budget far below one track still yields one track, so an artist
+        # holding a slot is never silently dropped from the playlist.
+        selected = select_tracks_for_artist(self._tracks(10), 1000, {}, {}, self.TODAY)
+        assert len(selected) == 1
 
     def test_result_ordered_best_first(self):
         # Tracks with higher setlist frequency should be selected first
