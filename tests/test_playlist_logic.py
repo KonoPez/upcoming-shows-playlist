@@ -236,94 +236,67 @@ class TestComputeArtistWeightsManual:
 
 # ── allocate_slots ────────────────────────────────────────────────────────────
 
-_MIN_MS = 420_000    # 2 tracks × 3.5 min — minimum budget threshold in tests
 _TARGET_MS = 4_200_000  # 70 min — target budget used across allocation tests
 
 
 class TestAllocateSlots:
     def test_total_equals_target(self):
         weights = {'a': 1.0, 'b': 0.5, 'c': 0.25}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS)
         assert sum(slots.values()) == _TARGET_MS
-
-    def test_all_included_artists_meet_min_duration(self):
-        weights = {'a': 1.0, 'b': 0.5, 'c': 0.25}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
-        assert all(v >= _MIN_MS for v in slots.values())
 
     def test_heavier_artist_gets_more_budget(self):
         weights = {'heavy': 1.0, 'light': 0.2}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS)
         assert slots['heavy'] > slots['light']
 
     def test_single_artist_gets_full_budget(self):
-        slots = allocate_slots({'only': 1.0}, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        slots = allocate_slots({'only': 1.0}, target_duration_ms=_TARGET_MS)
         assert slots == {'only': _TARGET_MS}
 
     def test_empty_weights_returns_empty(self):
         assert allocate_slots({}, target_duration_ms=_TARGET_MS) == {}
 
-    def test_artist_below_proportional_threshold_excluded(self):
-        # 'tiny' proportional share ≪ min_duration_ms → should be dropped
+    def test_tiny_weight_artist_still_included(self):
+        # No minimum-budget floor: every weighted artist keeps a slot, however
+        # small its proportional share.
         weights = {'big': 100.0, 'tiny': 0.001}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
-        assert 'tiny' not in slots
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS)
+        assert set(slots) == {'big', 'tiny'}
+        assert sum(slots.values()) == _TARGET_MS
 
     def test_no_budget_wasted(self):
         # Hamilton's method must distribute the full target
         weights = {'a': 3.0, 'b': 2.0, 'c': 1.0}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS)
         assert sum(slots.values()) == _TARGET_MS
 
     def test_two_equal_weight_artists_split_evenly(self):
         weights = {'a': 1.0, 'b': 1.0}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS)
         assert slots['a'] == slots['b'] == _TARGET_MS // 2
 
-    def test_min_duration_exclusion_redistributes_remaining_budget(self):
-        # 'tiny' is dropped for falling below the proportional min-duration
-        # floor; the full target must still be distributed across the
-        # artists that remain qualified (not silently lost).
-        weights = {'a': 10.0, 'b': 5.0, 'tiny': 0.001}
-        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_duration_ms=_MIN_MS)
-        assert 'tiny' not in slots
-        assert sum(slots.values()) == _TARGET_MS
-        assert slots['a'] > slots['b']
-
-    def test_no_artist_qualifies_falls_back_to_single_highest_weight(self):
-        # If min_duration_ms is so large that nobody's proportional share
-        # clears it, the whole target goes to the single highest-weight
-        # artist rather than returning an empty allocation.
-        weights = {'a': 1.0, 'b': 0.5, 'c': 0.25}
-        slots = allocate_slots(weights, target_duration_ms=1000, min_duration_ms=10_000_000)
-        assert slots == {'a': 1000}
-
-
-# Note: allocate_slots has a final "overage-trim" branch that only runs when the
-# min_duration_ms floors push the summed budget past target_duration_ms. It is
-# unreachable under the function's `int` contract: for every qualified artist
-# exact_q >= exact >= min_duration_ms, so floor(exact_q) >= min_duration_ms and
-# the max() clamp is a no-op, leaving sum(floors) <= target. It's defensive code
-# — deliberately left untested rather than exercised via off-contract input.
+    def test_zero_total_weight_returns_empty(self):
+        assert allocate_slots({'a': 0.0, 'b': 0.0}, target_duration_ms=_TARGET_MS) == {}
 
 
 # ── _parse_release_date ───────────────────────────────────────────────────────
 
 class TestParseReleaseDate:
     def test_full_iso_date(self):
-        assert _parse_release_date('2023-06-15', 'day') == date(2023, 6, 15)
+        assert _parse_release_date('2023-06-15') == date(2023, 6, 15)
 
     def test_year_month(self):
-        assert _parse_release_date('2023-06', 'month') == date(2023, 6, 1)
+        assert _parse_release_date('2023-06') == date(2023, 6, 1)
 
     def test_year_only(self):
-        assert _parse_release_date('2023', 'year') == date(2023, 1, 1)
+        assert _parse_release_date('2023') == date(2023, 1, 1)
 
     def test_invalid_date_falls_back_to_2000(self):
-        assert _parse_release_date('not-a-date', 'day') == date(2000, 1, 1)
+        assert _parse_release_date('not-a-date') == date(2000, 1, 1)
 
     def test_empty_string_falls_back(self):
-        assert _parse_release_date('', 'day') == date(2000, 1, 1)
+        assert _parse_release_date('') == date(2000, 1, 1)
 
 
 # ── _recency_score ────────────────────────────────────────────────────────────
@@ -360,17 +333,17 @@ class TestFamiliarity:
 
     def test_play_count_score(self):
         # 5 plays out of FAMILIAR_AT_N_PLAYS (10) → 0.5
-        assert abs(_familiarity('t1', {}, {'t1': 5}) - 0.5) < 1e-9
+        assert abs(_familiarity('t1', {}, {'t1': 5}) - 0.2) < 1e-9
 
     def test_play_count_at_cap_is_one(self):
-        assert _familiarity('t1', {}, {'t1': 10}) == 1.0
+        assert _familiarity('t1', {}, {'t1': 25}) == 1.0
 
     def test_play_count_above_cap_is_clamped(self):
         assert _familiarity('t1', {}, {'t1': 100}) == 1.0
 
     def test_max_of_api_and_play_history(self):
         # API says 0.3; play history says 0.7 → use 0.7
-        assert abs(_familiarity('t1', {'t1': 0.3}, {'t1': 7}) - 0.7) < 1e-9
+        assert abs(_familiarity('t1', {'t1': 0.2}, {'t1': 7}) - 0.28) < 1e-9
 
 
 
@@ -515,46 +488,3 @@ class TestSelectTracksForArtist:
         ids = [t.id for t in selected]
         assert ids == ['t5', 't4', 't3']   # highest setlist frequency first
 
-
-# ── select_tracks_for_artist — album cap ─────────────────────────────────────
-
-def _make_track(tid: str, album_id: str, release_date: str) -> Track:
-    return Track(
-        id=tid,
-        name=f'Track {tid}',
-        release_date=release_date,
-        release_date_precision='day',
-        album_id=album_id,
-        album_name=f'Album {album_id}',
-        duration_ms=_TRACK_MS,
-    )
-
-class TestSelectTracksAlbumCap:
-    TODAY = date(2024, 1, 1)
-
-    def test_cap_fills_remaining_from_other_album(self):
-        # Album A: 8 tracks (more recent); Album B: 4 tracks (older)
-        # Request 6 with cap=4 → 4 from A, 2 from B
-        tracks_a = [_make_track(f'a{i}', 'albumA', '2024-01-01')
-                    for i in range(8)]
-        tracks_b = [_make_track(f'b{i}', 'albumB', '2023-01-01')
-                    for i in range(4)]
-        selected = select_tracks_for_artist(
-            tracks_a + tracks_b, 6 * _TRACK_MS, {}, {}, self.TODAY, max_per_album=4
-        )
-        assert len(selected) == 6
-        assert sum(1 for t in selected if t.album_id == 'albumA') == 4
-        assert sum(1 for t in selected if t.album_id == 'albumB') == 2
-
-    def test_cap_zero_signals_scenario(self):
-        # No setlist or Last.fm data — recency is the only differentiator.
-        # Three albums ensure enough supply for 9 slots despite cap=4.
-        tracks_2026 = [_make_track(f'n{i}', 'new_album', '2026-01-01') for i in range(9)]
-        tracks_2023 = [_make_track(f'm{i}', 'mid_album', '2023-06-01') for i in range(9)]
-        tracks_2020 = [_make_track(f'o{i}', 'old_album', '2020-01-01') for i in range(9)]
-        selected = select_tracks_for_artist(
-            tracks_2026 + tracks_2023 + tracks_2020, 9 * _TRACK_MS, {}, {}, self.TODAY, max_per_album=4
-        )
-        assert len(selected) == 9
-        from_new = sum(1 for t in selected if t.album_id == 'new_album')
-        assert from_new <= 4   # newest album is capped; older albums fill the rest

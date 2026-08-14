@@ -20,9 +20,6 @@ APIs are configured, and no separate fallback weight sets are needed.
   NOVELTY (0.25): inverse of familiarity — surfaces tracks the user hasn't
     heard yet. Familiarity combines Spotify top-tracks API signal and local
     play-count history, taking the max.
-
-Example fallback ratios (neither Last.fm nor setlist configured):
-  active weights: RECENCY + NOVELTY = 0.30 → each normalises to 0.5 / 0.5.
 """
 
 import logging
@@ -39,10 +36,10 @@ RECENCY_W = 0.10
 NOVELTY_W = 0.25
 
 RECENCY_WINDOW_DAYS = 548   # 18 months
-FAMILIAR_AT_N_PLAYS = 10    # play count that maxes out familiarity
+FAMILIAR_AT_N_PLAYS = 25    # play count that maxes out familiarity
 
 
-def _parse_release_date(release_date: str, precision: str) -> date:
+def _parse_release_date(release_date: str) -> date:
     try:
         if len(release_date) == 10:
             return date.fromisoformat(release_date)
@@ -65,8 +62,8 @@ def _recency_score(release_date: date, today: date) -> float:
 
 def _familiarity(
     track_id: str,
-    spotify_familiarity: "dict[str, float]",
-    play_counts: "dict[str, int]",
+    spotify_familiarity: dict[str, float],
+    play_counts: dict[str, int],
 ) -> float:
     """Combined familiarity from Spotify API signal and local play history."""
     api_score = spotify_familiarity.get(track_id, 0.0)
@@ -90,7 +87,7 @@ def score_track(
     APIs are configured. Recency and novelty are always active; setlist and
     Last.fm weights only enter the denominator when their data is present.
     """
-    release_date = _parse_release_date(track.release_date, track.release_date_precision)
+    release_date = _parse_release_date(track.release_date)
     recency = _recency_score(release_date, today)
     novelty = 1.0 - _familiarity(track.id, spotify_familiarity, play_counts)
 
@@ -111,15 +108,14 @@ def score_track(
 
 
 def select_tracks_for_artist(
-    tracks: "list[Track]",
+    tracks: list[Track],
     duration_budget_ms: int,
     spotify_familiarity: dict,
     play_counts: dict,
     today: date,
-    max_per_album: int = 6,
     setlist_scores: Optional[dict] = None,
     lastfm_scores: Optional[dict] = None,
-) -> "list[Track]":
+) -> list[Track]:
     """
     Score all tracks for an artist and greedily select them until the
     cumulative duration reaches `duration_budget_ms`.
@@ -143,15 +139,10 @@ def select_tracks_for_artist(
     selected: list[Track] = []
     total_ms = 0
     for _, t in scored:
-        if t.album_id and album_counts.get(t.album_id, 0) >= max_per_album:
-            continue
 
         # Round to nearest rather than always up: take this track only if doing
-        # so lands closer to the budget than stopping here would. Stopping as
-        # soon as the budget is *exceeded* overshoots by up to a full track per
-        # artist — averaging half a track each, that compounds into 15+ minutes
-        # over target across a full playlist. The first track is always taken so
-        # every artist holding a budget is represented.
+        # so lands closer to the budget than stopping here would. 
+        # The first track is always taken so every artist holding a budget is represented.
         remaining_ms = duration_budget_ms - total_ms
         if selected and remaining_ms * 2 < t.duration_ms:
             break

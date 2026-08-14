@@ -7,7 +7,7 @@ Covers:
   - sources/ticketmaster._concerts_from_event / get_local_events — new TM methods
   - sources/lastfm.get_artist_listeners    — new Last.fm method
   - Regression: every artist selected by select_discovery_artists receives a
-    non-zero duration budget from allocate_slots (min_duration_ms=0 fix)
+    non-zero duration budget from allocate_slots
 """
 
 import math
@@ -22,7 +22,6 @@ from playlist_logic.discovery_weighting import (
     ENJOYMENT_EXPONENT,
     FAMILIARITY_W,
     POPULARITY_W,
-    PROXIMITY_EXPONENT,
     compute_artist_familiarity_scores,
     compute_discovery_weights,
     score_artist_enjoyment,
@@ -250,17 +249,6 @@ class TestComputeDiscoveryWeights:
         weights = compute_discovery_weights(artists, {'a1': 0.0}, _TODAY)
         assert weights['a1'] == 0.0
 
-    def test_proximity_exponent_applied(self):
-        # For two artists with same enjoyment, ratio should reflect proximity^PROXIMITY_EXPONENT
-        artists = {'near': _artist('near', 10), 'far': _artist('far', 50)}
-        scores  = {'near': 1.0, 'far': 1.0}
-        weights = compute_discovery_weights(artists, scores, _TODAY)
-        prox_near = concert_weight(10) ** PROXIMITY_EXPONENT
-        prox_far  = concert_weight(50) ** PROXIMITY_EXPONENT
-        expected_ratio = prox_near / prox_far
-        actual_ratio   = weights['near'] / weights['far']
-        assert abs(actual_ratio - expected_ratio) < 1e-9
-
     def test_enjoyment_exponent_applied(self):
         # Same proximity, different enjoyment — ratio follows enjoyment^ENJOYMENT_EXPONENT
         artists = {'strong': _artist('strong', 30), 'weak': _artist('weak', 30)}
@@ -278,25 +266,24 @@ class TestComputeDiscoveryWeights:
 
 class TestEverySelectedArtistGetsSlot:
     """
-    With min_duration_ms=0, allocate_slots must return a non-zero budget for
-    every artist passed to it, even those with very low weights. This ensures
-    that the three artists previously excluded from the discovery playlist
-    (because their proportional share fell below the old 210_000 ms floor)
-    now always receive at least enough budget for select_tracks_for_artist to
-    return at least one track.
+    allocate_slots must return a non-zero budget for every artist passed to it,
+    even those with very low weights. This ensures that the three artists
+    previously excluded from the discovery playlist (because their proportional
+    share fell below the old 210_000 ms floor) now always receive at least
+    enough budget for select_tracks_for_artist to return at least one track.
     """
 
     def test_all_artists_receive_nonzero_budget(self):
         # 10 artists with weights spanning two orders of magnitude
         weights = {f'a{i}': 1.0 / (i + 1) for i in range(10)}
-        slots = allocate_slots(weights, target_duration_ms=7_200_000, min_duration_ms=0)
+        slots = allocate_slots(weights, target_duration_ms=7_200_000)
         assert set(slots.keys()) == set(weights.keys())
         assert all(v > 0 for v in slots.values()), \
             f'Some artists got zero budget: {[(k,v) for k,v in slots.items() if v==0]}'
 
     def test_total_still_equals_target(self):
         weights = {f'a{i}': 1.0 / (i + 1) for i in range(10)}
-        slots = allocate_slots(weights, target_duration_ms=7_200_000, min_duration_ms=0)
+        slots = allocate_slots(weights, target_duration_ms=7_200_000)
         assert sum(slots.values()) == 7_200_000
 
     def test_tiny_weight_artist_gets_at_least_one_track(self):
@@ -308,7 +295,7 @@ class TestEverySelectedArtistGetsSlot:
         from playlist_logic.scoring import select_tracks_for_artist
 
         weights = {'dominant': 999.0, 'tiny': 1.0}
-        slots = allocate_slots(weights, target_duration_ms=7_200_000, min_duration_ms=0)
+        slots = allocate_slots(weights, target_duration_ms=7_200_000)
 
         tiny_budget = slots['tiny']
         assert tiny_budget > 0   # budget is positive

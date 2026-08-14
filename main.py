@@ -48,7 +48,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ENV_FILE = Path('.env')
-_ASSUMED_AVG_TRACK_MS = 210_000   # 3.5 min — used to convert min_tracks_per_artist to a duration floor
 
 
 # ── Setup ────────────────────────────────────────────────────────────────────
@@ -378,7 +377,6 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     slots = allocate_slots(
         weights,
         target_duration_ms=config.playlist_target_duration_minutes * 60_000,
-        min_duration_ms=config.min_tracks_per_artist * _ASSUMED_AVG_TRACK_MS,
     )
 
     # 6. Get user familiarity from Spotify API
@@ -897,12 +895,12 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     play_counts = cache.get_artist_play_counts()
     # extract {id: score} for familiarity; {name_lower: score} for similarity taste profile
     top_score_values = {aid: v.score for aid, v in top_scores.items()}
-    taste_profile    = {v.name.lower(): v.score for v in top_scores.values()}
     familiarity = compute_artist_familiarity_scores(candidate_ids, top_score_values, play_counts)
 
     # 10. Fetch Last.fm signals (optional — skipped if LASTFM_API_KEY not set)
     raw_listeners: dict[str, int] = {}
     similarity_by_id: dict[str, float] = {}
+    taste_profile = {v.name.lower(): v.score for v in top_scores.values()}
     if config.lastfm_api_key:
         lastfm_client = LastFmClient(config.lastfm_api_key, cache)
 
@@ -948,7 +946,6 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     slots   = allocate_slots(
         weights,
         target_duration_ms=config.discovery_target_duration_minutes * 60_000,
-        min_duration_ms=0,   # every selected artist gets a slot; select_tracks rounds up to 1 track
     )
 
     # 13. Get track-level familiarity for scoring

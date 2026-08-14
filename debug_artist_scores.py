@@ -68,7 +68,7 @@ def main(artist_name: str) -> None:
     for t in tracks:
         total = score_track(t, spotify_familiarity, play_counts, today, setlist_scores, lastfm_scores)
 
-        release_date = _parse_release_date(t.release_date, t.release_date_precision)
+        release_date = _parse_release_date(t.release_date)
         recency = _recency_score(release_date, today)
         novelty = 1.0 - _familiarity(t.id, spotify_familiarity, play_counts)
         name_key = normalize_track_name(t.name)

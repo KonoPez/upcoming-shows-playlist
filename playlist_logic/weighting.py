@@ -49,15 +49,9 @@ def compute_artist_weights(
     Compute a raw weight for each artist.
 
     artist_concerts: {spotify_artist_id: [Concert, ...]}
-      Each entry is one concert appearance. An artist with two concerts —
-      one in 10 days and one in 40 days — gets the *sum* of both weights.
-      Headliner slots (is_opener=False) receive a HEADLINER_BONUS multiplier
-      so headliners claim a proportionally larger share than supporting acts.
-      An artist can be a headliner at one show and an opener at another; the
-      bonus is applied per concert, not per artist.
-
-    Every appearance is weighted identically regardless of `source`, so a
-    manually added show competes on the same terms as a calendar one.
+      Each entry is one concert appearance. An artist with two concerts
+      gets the *sum* of both weights. Headliner slots (is_opener=False) 
+      receive a HEADLINER_BONUS multiplier
 
     Returns: {spotify_artist_id: raw_weight}
     """
@@ -74,11 +68,10 @@ def compute_artist_weights(
 def allocate_slots(
     weights: dict[str, float],
     target_duration_ms: int,
-    min_duration_ms: int = 0,
 ) -> dict[str, int]:
     """
     Distribute `target_duration_ms` across artists proportional to their weights.
-    Artists whose proportional share is below `min_duration_ms` are excluded.
+    Every artist with a non-zero weight receives a budget.
     Returns: {spotify_artist_id: duration_budget_ms}
     """
     if not weights:
@@ -91,22 +84,10 @@ def allocate_slots(
     # Exact proportional allocation
     exact = {aid: (w / total_weight) * target_duration_ms for aid, w in weights.items()}
 
-    # Exclude artists whose share is too small to justify the minimum
-    qualified = {aid: e for aid, e in exact.items() if e >= min_duration_ms}
-
-    if not qualified:
-        top = max(weights, key=weights.__getitem__)
-        return {top: target_duration_ms}
-
-    # Recompute proportions over qualified artists only
-    q_weight_total = sum(weights[a] for a in qualified)
-    exact_q = {aid: (weights[aid] / q_weight_total) * target_duration_ms for aid in qualified}
-
-    # Floor each value (enforce min_duration_ms floor)
-    floors = {aid: max(min_duration_ms, math.floor(v)) for aid, v in exact_q.items()}
+    floors = {aid: math.floor(v) for aid, v in exact.items()}
 
     # Hamilton's method: distribute remaining ms by largest fractional remainder
-    remainders = {aid: exact_q[aid] - math.floor(exact_q[aid]) for aid in exact_q}
+    remainders = {aid: exact[aid] - floors[aid] for aid in exact}
     leftover = target_duration_ms - sum(floors.values())
 
     for aid, _ in sorted(remainders.items(), key=lambda x: x[1], reverse=True):
@@ -114,15 +95,6 @@ def allocate_slots(
             break
         floors[aid] += 1
         leftover -= 1
-
-    # If min_duration_ms floors pushed us over budget, trim from lightest artists first
-    overage = sum(floors.values()) - target_duration_ms
-    for aid in sorted(floors, key=weights.get):
-        if overage <= 0:
-            break
-        trim = min(floors[aid] - min_duration_ms, overage)
-        floors[aid] -= trim
-        overage -= trim
 
     logger.debug('Duration budget allocation:')
     for aid, budget in sorted(floors.items(), key=lambda x: -x[1]):

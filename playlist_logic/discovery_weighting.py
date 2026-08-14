@@ -26,15 +26,14 @@ from typing import Optional
 
 from playlist_logic.weighting import concert_weight
 from sources.models import Artist
+from sources.lastfm import LastFmClient
 
 logger = logging.getLogger(__name__)
 
-FAMILIARITY_W       = 0.75
-POPULARITY_W        = 0.25
-SIMILARITY_W        = 0.35
+FAMILIARITY_W       = 0.65
+POPULARITY_W        = 0.15
+SIMILARITY_W        = 0.20
 ENJOYMENT_EXPONENT  = 1.5   # steeper decay toward low-scoring artists
-PROXIMITY_EXPONENT  = 1.0   # full decay — concerts happening sooner get proportionally
-                             # more weight. Uses concert_weight's 21-day half-life directly.
 
 
 def compute_artist_familiarity_scores(
@@ -53,19 +52,14 @@ def compute_artist_familiarity_scores(
     unfairly penalize artists with modest play counts relative to the user's
     most-listened-to artist overall.
     """
-    # Log-normalize play counts within the candidate set
     candidate_counts = [play_counts.get(aid, 0) for aid in candidate_ids]
-    max_count = max(candidate_counts) if candidate_counts else 0
-
-    def _play_score(count: int) -> float:
-        if max_count == 0 or count == 0:
-            return 0.0
-        return math.log(count + 1) / math.log(max_count + 1)
+    max_count = max(candidate_counts, default=1)
+    log_max = math.log(max_count + 1) if max_count > 0 else 1
 
     familiarity: dict[str, float] = {}
     for aid in candidate_ids:
         api_score  = top_scores.get(aid, 0.0)
-        play_score = _play_score(play_counts.get(aid, 0))
+        play_score =  math.log(play_counts.get(aid, 0) + 1) / log_max
         familiarity[aid] = max(api_score, play_score)
 
     return familiarity
@@ -76,9 +70,7 @@ def _normalize_popularity(raw_listeners: dict[str, int]) -> dict[str, float]:
     Log-normalize Last.fm listener counts across the candidate set.
     Returns {} if no data is available.
     """
-    if not raw_listeners:
-        return {}
-    max_listeners = max(raw_listeners.values())
+    max_listeners = max(raw_listeners.values(), default=0)
     if max_listeners == 0:
         return {}
     log_max = math.log(max_listeners + 1)
@@ -116,8 +108,8 @@ def score_artist_enjoyment(
 
 def compute_artist_similarity_scores(
     candidate_names: list,
-    taste_profile: dict,
-    lastfm_client: object,
+    taste_profile: dict[str, float],
+    lastfm_client: LastFmClient,
 ) -> dict[str, float]:
     """
     Return {artist_name_lower: similarity_score} for each candidate.
@@ -144,7 +136,7 @@ def compute_artist_similarity_scores(
             for similar_name, weight in similar.items()
         )
 
-    max_raw = max(raw.values()) if raw else 0.0
+    max_raw = max(raw.values(), default=0.0)
     if max_raw == 0.0:
         return {name.lower(): 0.0 for name in candidate_names}
 
@@ -177,11 +169,9 @@ def select_discovery_artists(
 
     enjoyment: dict[str, float] = {}
     for aid in candidate_ids:
-        fam  = familiarity_scores.get(aid, 0.0)
-        pop  = popularity_scores.get(aid)        # None when Last.fm not configured
-        sim  = None
-        if similarity_scores is not None:
-            sim = similarity_scores.get(aid)  # keyed by artist ID; caller converts from names
+        fam = familiarity_scores.get(aid, 0.0)
+        pop = popularity_scores.get(aid)                                            # None when Last.fm not configured
+        sim = similarity_scores.get(aid) if similarity_scores is not None else None # keyed by artist ID; caller converts from names
         enjoyment[aid] = score_artist_enjoyment(fam, pop, sim)
 
     qualified = [
@@ -212,21 +202,17 @@ def compute_discovery_weights(
     """
     Compute slot-allocation weights combining enjoyment and concert proximity.
 
-    weight = enjoyment^ENJOYMENT_EXPONENT * proximity_decay
+    weight = enjoyment^ENJOYMENT_EXPONENT * proximity
 
     Uses the nearest upcoming concert for each artist's proximity score.
     """
     weights: dict[str, float] = {}
     for artist_id, artist in artists.items():
         enjoyment  = enjoyment_scores.get(artist_id, 0.0)
-        # max over concert_weights = the nearest *upcoming* concert's proximity
-        # (concert_weight is 0 only for past shows; a show today counts as fully
-        # proximate), so a past show can't zero out an artist who also has a
-        # real upcoming (or today's) one.
         proximity  = max(
             (concert_weight(c.days_until(today)) for c in artist.concerts),
             default=0.0,
-        ) ** PROXIMITY_EXPONENT
+        )
         weights[artist_id] = (enjoyment ** ENJOYMENT_EXPONENT) * proximity
 
     return weights
