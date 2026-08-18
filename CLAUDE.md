@@ -36,7 +36,7 @@ python main.py --update --cron      # mark this run as cron-triggered in the run
 python -m pytest tests/ -v
 ```
 
-482 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
+483 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
 
 ## Project layout
 
@@ -45,6 +45,7 @@ main.py                         # CLI entrypoint, prep + discovery orchestration
 config.py                       # Config dataclass, loaded from .env via python-dotenv
 cache.py                        # SQLite-backed KV cache (TTL) + play-history + run log
 artist_resolver.py              # Calendar title parsing + Spotify artist ID resolution
+track_names.py                  # Track title normalisation (variant suffix stripping)
 sources/
   models.py                     # Concert, Track, Artist dataclasses
   apple_calendar.py             # iCloud CalDAV client
@@ -61,6 +62,7 @@ playlist_logic/
   discovery_weighting.py        # Artist enjoyment scoring + discovery slot allocation
 tests/
   test_artist_resolver.py       # Title parsing, artist splitting, Spotify search, resolve_artist
+  test_track_names.py           # Track title normalisation
   test_playlist_logic.py        # Weighting, slot allocation, track scoring, album interleaving
   test_cache.py                 # KV TTL cache, play history accumulation
   test_spotify_client.py        # Variant filter, album-vs-single preference, dedup, canonical names

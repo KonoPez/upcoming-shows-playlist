@@ -410,9 +410,9 @@ class TestConcertsFromEvent:
         ))
         assert concerts[0].tm_spotify_id == 'abc123'
 
-    def test_missing_spotify_link_gives_none(self):
+    def test_missing_spotify_link_gives_empty(self):
         concerts = _concerts_from_event(_tm_event(['Artist']))
-        assert concerts[0].tm_spotify_id is None
+        assert concerts[0].tm_spotify_id == ''
 
     def test_correct_concert_count_for_multi_artist_event(self):
         concerts = _concerts_from_event(_tm_event(['A', 'B', 'C']))

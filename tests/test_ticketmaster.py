@@ -76,11 +76,11 @@ class TestExtractSpotifyId:
     def test_spotify_uri(self):
         assert _extract_spotify_id("spotify:artist:def456") == "def456"
 
-    def test_returns_none_for_unrecognised_url(self):
-        assert _extract_spotify_id("https://example.com/artist/foo") is None
+    def test_returns_empty_for_unrecognised_url(self):
+        assert _extract_spotify_id("https://example.com/artist/foo") == ""
 
-    def test_returns_none_for_empty_string(self):
-        assert _extract_spotify_id("") is None
+    def test_returns_empty_for_empty_string(self):
+        assert _extract_spotify_id("") == ""
 
     def test_alphanumeric_id_preserved(self):
         assert _extract_spotify_id(
@@ -190,11 +190,11 @@ class TestExtractOpeners:
         openers = client._extract_openers(event, 'Good Kid', date(2026, 4, 26), 'The Fillmore')
         assert openers[0].tm_spotify_id == 'inoha123'
 
-    def test_no_spotify_link_gives_none(self):
+    def test_no_spotify_link_gives_empty(self):
         client = self._client()
         event = self._event([{'name': 'Good Kid'}, {'name': 'INOHA'}])
         openers = client._extract_openers(event, 'Good Kid', date(2026, 4, 26), 'The Fillmore')
-        assert openers[0].tm_spotify_id is None
+        assert openers[0].tm_spotify_id == ''
 
     def test_empty_attractions_returns_empty(self):
         client = self._client()

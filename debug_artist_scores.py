@@ -16,7 +16,7 @@ from spotify_client.auth import get_spotify_client
 from spotify_client.client import SpotifyClient, deduplicate_tracks
 from sources.setlist import SetlistClient
 from sources.lastfm import LastFmClient
-from sources.models import normalize_track_name
+from track_names import normalize_track_name
 from playlist_logic.scoring import (
     score_track,
     _recency_score,

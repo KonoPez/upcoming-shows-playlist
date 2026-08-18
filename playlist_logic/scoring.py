@@ -26,7 +26,8 @@ import logging
 from datetime import date
 from typing import Optional
 
-from sources.models import Track, normalize_track_name
+from sources.models import Track
+from track_names import normalize_track_name
 
 logger = logging.getLogger(__name__)
 

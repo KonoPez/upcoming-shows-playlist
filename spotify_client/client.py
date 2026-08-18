@@ -11,7 +11,8 @@ from typing import NamedTuple, Optional
 import spotipy
 
 from cache import Cache
-from sources.models import Track, normalize_track_name
+from sources.models import Track
+from track_names import VARIANT_KEYWORDS, normalize_track_name
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,12 @@ _VARIANT_ALBUM_RE = re.compile(
 # Parenthetical form requires parens so "Live Wire" or "Acoustic" as a title is unaffected.
 # Dash form requires the keyword to start immediately after the dash so "Song - A Demo
 # of Courage" would not match, but in practice that pattern doesn't occur on Spotify.
+# Keywords come from track_names so the filter rejects exactly the suffixes
+# normalize_track_name strips; the surrounding shapes differ because this only
+# has to recognise a variant, not remove it.
 _VARIANT_TRACK_RE = re.compile(
-    r'\(.*\b(live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)\b.*\)'
-    r'|\s+[-–]\s+(live|acoustic|unplugged|remix|instrumental|demo|a\s*cappella|acapella)\b',
+    rf'\(.*\b{VARIANT_KEYWORDS}\b.*\)'
+    rf'|\s+[-–]\s+{VARIANT_KEYWORDS}\b',
     re.IGNORECASE,
 )
 

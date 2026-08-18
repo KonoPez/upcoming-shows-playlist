@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from icalendar import Calendar as ICalendar, Event as IEvent
 
 from sources.apple_calendar import AppleCalendarClient
 from sources.google_calendar import GoogleCalendarClient
@@ -47,17 +48,22 @@ def _apple_event(
     dtstart=None,
     location=None,
 ):
-    """Fake CalDAV event — matches the vobject attribute structure _parse uses."""
-    attrs = {}
+    """Fake CalDAV event resource — `.data` holds ICS text, as a real one does."""
+    vevent = IEvent()
     if summary:
-        attrs['summary'] = SimpleNamespace(value=summary)
+        vevent.add('SUMMARY', summary)
     if description is not None:
-        attrs['description'] = SimpleNamespace(value=description)
-    attrs['dtstart'] = SimpleNamespace(value=dtstart)
+        vevent.add('DESCRIPTION', description)
+    if dtstart is not None:
+        vevent.add('DTSTART', dtstart)
     if location is not None:
-        attrs['location'] = SimpleNamespace(value=location)
-    vevent = SimpleNamespace(**attrs)
-    return SimpleNamespace(vobject_instance=SimpleNamespace(vevent=vevent))
+        vevent.add('LOCATION', location)
+
+    cal = ICalendar()
+    cal.add('PRODID', '-//concert-playlist tests//EN')
+    cal.add('VERSION', '2.0')
+    cal.add_component(vevent)
+    return SimpleNamespace(data=cal.to_ical().decode())
 
 
 # ── GoogleCalendarClient._parse ───────────────────────────────────────────────
@@ -316,9 +322,21 @@ class TestAppleCalendarParse:
         evt = _apple_event('Radiohead @ MSG', dtstart=date(2024, 7, 1))
         assert self.client._parse(evt)[0].is_opener is False
 
-    def test_unrecognised_dtstart_type_returns_empty(self):
-        # dtstart.value that is neither date nor datetime → _parse returns []
-        evt = _apple_event('Radiohead @ MSG', dtstart='not-a-date')
+    def test_missing_dtstart_returns_empty(self):
+        evt = _apple_event('Radiohead @ MSG')
+        assert self.client._parse(evt) == []
+
+    def test_malformed_dtstart_returns_empty(self):
+        # icalendar drops a DTSTART it cannot parse, so the property is absent
+        evt = SimpleNamespace(data=(
+            'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n'
+            'SUMMARY:Radiohead @ MSG\r\nDTSTART:not-a-date\r\n'
+            'END:VEVENT\r\nEND:VCALENDAR\r\n'
+        ))
+        assert self.client._parse(evt) == []
+
+    def test_event_with_no_vevent_returns_empty(self):
+        evt = SimpleNamespace(data='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n')
         assert self.client._parse(evt) == []
 
     def test_parse_exception_returns_empty(self):
@@ -329,12 +347,6 @@ class TestAppleCalendarParse:
 # ── AppleCalendarClient.get_concerts ─────────────────────────────────────────
 
 class TestAppleCalendarGetConcerts:
-    def test_caldav_not_available_returns_empty(self):
-        client = AppleCalendarClient('user@icloud.com', 'pass')
-        with patch('sources.apple_calendar.CALDAV_AVAILABLE', False):
-            result = client.get_concerts(START, END)
-        assert result == []
-
     def test_fetch_exception_returns_empty(self):
         client = AppleCalendarClient('user@icloud.com', 'pass')
         with patch.object(client, '_fetch', side_effect=Exception('connection refused')):

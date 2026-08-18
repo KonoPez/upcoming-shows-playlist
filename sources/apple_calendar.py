@@ -1,9 +1,6 @@
 """
 Apple Calendar / iCloud integration via caldav.
 
-Requires:
-  pip install caldav icalendar
-
 Authentication requires an app-specific password (NOT your Apple ID password).
 Generate one at: https://appleid.apple.com → Sign-In and Security → App-Specific Passwords
 
@@ -14,18 +11,14 @@ the artist name is extracted from the event title.
 import concurrent.futures
 import logging
 from datetime import date, datetime, timezone
-from typing import Optional
+
+import caldav
+from icalendar import Calendar
 
 from artist_resolver import extract_artist_from_calendar_title, is_likely_concert, split_artist_names
 from sources.models import Concert
 
 logger = logging.getLogger(__name__)
-
-try:
-    import caldav
-    CALDAV_AVAILABLE = True
-except ImportError:
-    CALDAV_AVAILABLE = False
 
 ICLOUD_URL = 'https://caldav.icloud.com'
 
@@ -36,13 +29,6 @@ class AppleCalendarClient:
         self.app_password = app_password
 
     def get_concerts(self, start_date: date, end_date: date) -> list[Concert]:
-        if not CALDAV_AVAILABLE:
-            logger.warning(
-                'caldav not installed. Run: pip install caldav icalendar\n'
-                'Apple Calendar integration will be skipped.'
-            )
-            return []
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self._fetch, start_date, end_date)
             try:
@@ -90,22 +76,28 @@ class AppleCalendarClient:
         logger.info(f'Apple Calendar: {len(concerts)} concert-like events found (searched {len(calendars)} calendars)')
         return concerts
 
-    def _parse(self, event) -> list[Concert]:
+    def _parse(self, event: caldav.Event) -> list[Concert]:
         try:
-            vobj = event.vobject_instance
-            vevent = vobj.vevent
+            vevents = Calendar.from_ical(event.data).walk('VEVENT')
+            if not vevents:
+                return []
+            vevent = vevents[0]
 
-            summary = str(vevent.summary.value) if hasattr(vevent, 'summary') else ''
-            description = str(vevent.description.value) if hasattr(vevent, 'description') else ''
+            summary = str(vevent.get('SUMMARY', ''))
+            description = str(vevent.get('DESCRIPTION', ''))
 
             if not is_likely_concert(summary, description):
                 return []
 
-            dtstart = vevent.dtstart.value
-            if isinstance(dtstart, datetime):
-                event_date = dtstart.date()
-            elif isinstance(dtstart, date):
-                event_date = dtstart
+            dtstart = vevent.get('DTSTART')
+            if not dtstart:
+                return []
+
+            dt = dtstart.dt
+            if isinstance(dt, datetime):
+                event_date = dt.date()
+            elif isinstance(dt, date):
+                event_date = dt
             else:
                 return []
 
@@ -113,9 +105,7 @@ class AppleCalendarClient:
             if not artist_string:
                 return []
 
-            location = (
-                str(vevent.location.value) if hasattr(vevent, 'location') else 'Unknown Venue'
-            )
+            location = str(vevent.get('LOCATION', 'Unknown Venue'))
 
             # Bills are written headliner-first ("Headliner w/ Support1, Support2"),
             # so everything after the first name is a supporting act. Same

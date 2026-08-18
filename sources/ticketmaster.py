@@ -46,10 +46,10 @@ def _venue_matches(cal_venue: str, tm_venue: str) -> bool:
     return a in b or b in a
 
 
-def _extract_spotify_id(url: str) -> Optional[str]:
+def _extract_spotify_id(url: str) -> str:
     """Extract a Spotify artist ID from a URL or URI string."""
     m = re.search(r'spotify(?:\.com/artist/|:artist:)([A-Za-z0-9]+)', url)
-    return m.group(1) if m else None
+    return m.group(1) if m else ""
 
 
 # ── Concert serialization (for KV cache) ─────────────────────────────────────
@@ -73,7 +73,9 @@ def _concert_from_dict(d: dict) -> Concert:
         event_date=date.fromisoformat(d['event_date']),
         venue=d['venue'],
         source=d['source'],
-        tm_spotify_id=d.get('tm_spotify_id'),
+        # `or ''` rather than a .get default: entries cached before the field
+        # became a bare str hold an explicit null, which .get would pass through.
+        tm_spotify_id=d.get('tm_spotify_id') or '',
         is_opener=d.get('is_opener', False),
     )
 
@@ -81,9 +83,7 @@ def _concert_from_dict(d: dict) -> Concert:
 def _concerts_from_event(event: dict) -> list[Concert]:
     """
     Convert a raw Ticketmaster event object into one Concert per attraction.
-    The first attraction is treated as the headliner (is_opener=False);
-    remaining attractions are openers (is_opener=True).
-    Events with no localDate or no attractions are skipped.
+    The first attraction is treated as the headliner (is_opener=False.
     """
     local_date = event.get('dates', {}).get('start', {}).get('localDate')
     if not local_date:
@@ -108,7 +108,7 @@ def _concerts_from_event(event: dict) -> list[Concert]:
         if not name:
             continue
 
-        spotify_id: Optional[str] = None
+        spotify_id: str = ''
         for link in attr.get('externalLinks', {}).get('spotify', []):
             spotify_id = _extract_spotify_id(link.get('url', ''))
             if spotify_id:
@@ -147,7 +147,7 @@ class TicketmasterClient:
         Return Concert objects for all music events within radius_miles of the
         given location over the next window_days.
 
-        Exactly one of latlong ("lat,lng") or city (city name string) must be
+        Either latlong ("lat,lng") or city (city name string) must be
         provided. Results are cached for LOCAL_EVENTS_TTL.
         """
         if not latlong and not city:
@@ -245,7 +245,7 @@ class TicketmasterClient:
                     event_date=event_date,
                     venue=venue,
                     source='ticketmaster',
-                    tm_spotify_id=item.get('spotify_id'),
+                    tm_spotify_id=item.get('spotify_id') or '',
                     is_opener=True,
                 )
                 for item in cached
@@ -366,7 +366,7 @@ class TicketmasterClient:
             if not name or name.lower() == headliner.lower():
                 continue
 
-            spotify_id: Optional[str] = None
+            spotify_id: str = ''
             for link in attr.get('externalLinks', {}).get('spotify', []):
                 spotify_id = _extract_spotify_id(link.get('url', ''))
                 if spotify_id:

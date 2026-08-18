@@ -47,7 +47,7 @@ def resolve_artist(
     artist_name: str,
     sp: spotipy.Spotify,
     cache: Cache,
-    tm_spotify_id: Optional[str] = None,
+    tm_spotify_id: str = '',
 ) -> Optional[str]:
     """
     Resolve an artist name to a Spotify artist ID.
@@ -137,31 +137,13 @@ def _search_spotify(name: str, sp: spotipy.Spotify) -> Optional[str]:
 
 def split_artist_names(artist_string: str) -> list[str]:
     """
-    Split a combined artist string into individual artist names.
+    Split a multi-act bill ("Headliner w/ Support1, Support2 & Support3") into
+    individual artist names.
 
-    Handles common multi-act bill formats:
-      "Headliner w/ Support1, Support2 & Support3"
-      "Artist1, Artist2 & Artist3"  (comma + & together → clear list)
-      "Artist1, Artist2, Artist3"   (multiple commas → clear list)
-      "Artist1 feat. Artist2"
-      "Headliner w/ Support1 and Support2"  (w/ opens a support list)
-
-    Returns a single-element list when the pattern is ambiguous:
-      "Black Country, New Road"  — single comma, no & → kept intact
-      "Simon & Garfunkel"        — single &, no comma → kept intact
-
-    The rule for bare comma/& splitting: only split when ≥2 commas are
-    present, or when a comma and a conjunction (&/and) appear together.
-    Either pattern strongly implies a list rather than a band name.
-    w/ and feat. variants are always unambiguous and always split, and
-    everything after them is a support list, where a bare conjunction is
-    a list separator rather than part of a band name.
-
-    A conjunction followed by "the" ("Prince Daddy and the Hyena",
-    "Florence and the Machine") is never treated as a separator — that
-    shape is overwhelmingly a single band name.
+    Band names contain commas and conjunctions too, so a string whose structure
+    doesn't clearly signal a list is returned intact as a single name.
     """
-    # Unambiguous separators: w/ and feat variants — always split on these
+    # "w/" and "feat." generally separate one act from another.
     parts = re.split(
         r'\s+w/\s+|\s+(?:feat\.?|ft\.?|featuring)\s+',
         artist_string,
@@ -172,17 +154,16 @@ def split_artist_names(artist_string: str) -> list[str]:
     for index, part in enumerate(parts):
         part = part.strip()
         comma_count = part.count(',')
-        # Any conjunction signals list-ness ("A, B and the C" is still a list);
-        # only the separator-shaped ones are actually split on.
+        # Two separate questions. Any conjunction is evidence the part is a
+        # list, but only a separator-shaped one is a place to cut: "Cheekface,
+        # Prince Daddy and the Hyena" cuts at the comma, not at the "and".
         has_conjunction = bool(re.search(r'\s+(?:&|and)\s+', part, re.IGNORECASE))
         has_separator = bool(re.search(_CONJUNCTION, part, re.IGNORECASE))
-        # Anything after a w/ or feat. is an enumerated support slot, so a
-        # conjunction there continues the list ("w/ Combat and Walter Etc.").
         in_support_list = index > 0
 
-        # Only split on comma/& when the structure clearly indicates a list:
-        # multiple commas ("A, B, C") or comma + conjunction ("A, B & C").
-        # A single lone comma or lone & is treated as part of the band name.
+        # One comma ("Black Country, New Road") or one conjunction ("Simon &
+        # Garfunkel") sits inside band names too often to split on. Two commas,
+        # or a comma plus a conjunction, is a list.
         clear_list = comma_count >= 2 or (comma_count >= 1 and has_conjunction)
         if clear_list or (in_support_list and has_separator):
             sub = re.split(rf'\s*,\s*|{_CONJUNCTION}', part, flags=re.IGNORECASE)
@@ -198,16 +179,6 @@ def extract_artist_from_calendar_title(title: str) -> str:
     """
     Best-effort extraction of an artist name from a calendar event title.
     Falls back to the full title if no pattern matches.
-
-    Handles:
-      "Hozier @ The Forum"
-      "Phoebe Bridgers at The Greek Theatre"
-      "Radiohead - In Rainbows Tour"
-      "An Evening with Norah Jones"
-      "boygenius (SOLD OUT)"
-      "Paramore: This Is Why Tour"
-      "INOHA | This Might Be Useful Tour 2026"
-      "Vampire Weekend Live"
     """
     # Strip known label prefixes — e.g. "Ticket: Artist Name" or "Tickets: ..."
     title = re.sub(r'^tickets?\s*:\s*', '', title, flags=re.IGNORECASE).strip()
@@ -218,19 +189,19 @@ def extract_artist_from_calendar_title(title: str) -> str:
     title = re.sub(r'\s*-\s*POSTPONED$', '', title, flags=re.IGNORECASE).strip()
 
     patterns = [
-        (r'^(.+?)\s+@\s+', 1),                                 # Artist @ Venue
-        (r'^(.+?)\s+at\s+(?:the\s+)?\w', 1),                  # Artist at [The] Venue
-        (r'^An\s+Evening\s+with\s+(.+?)$', 1),                 # An Evening with Artist
-        (r'^(.+?)\s*:\s*', 1),                                  # Artist: Subtitle
-        (r'^(.+?)\s*\|\s*', 1),                                 # Artist | Tour Name (ticketing format)
-        (r'^(.+?)\s+[-–]\s+', 1),                              # Artist - Tour Name
-        (r'^(.+?)\s+(?:Live|Concert|Tour|Show|Presents)\b', 1), # Artist Live/Tour/Show
+        r'^(.+?)\s+@\s+',                                  # Artist @ Venue
+        r'^(.+?)\s+at\s+(?:the\s+)?\w',                    # Artist at [The] Venue
+        r'^An\s+Evening\s+with\s+(.+?)$',                  # An Evening with Artist
+        r'^(.+?)\s*:\s*',                                  # Artist: Subtitle
+        r'^(.+?)\s*\|\s*',                                 # Artist | Tour Name (ticketing format)
+        r'^(.+?)\s+[-–]\s+',                               # Artist - Tour Name
+        r'^(.+?)\s+(?:Live|Concert|Tour|Show|Presents)\b',  # Artist Live/Tour/Show
     ]
 
-    for pattern, group in patterns:
+    for pattern in patterns:
         m = re.match(pattern, title, re.IGNORECASE)
         if m:
-            extracted = m.group(group).strip()
+            extracted = m.group(1).strip()
             if len(extracted) >= 2:
                 return extracted
 
@@ -243,8 +214,6 @@ def is_likely_concert(title: str, description: str = '') -> bool:
     keywords = [
         ' concert', ' tour', ' show', ' live', ' gig',
         ' @ ', ' festival', ' performing', ' tickets',
-        # Ticketing-service calendar invites: title starts "Ticket: Artist"
-        # and description contains "Provider: Ticketmaster" (or AXS, DICE, etc.)
         'ticket:', 'ticketmaster', 'axs.com', 'dice.fm', 'seetickets',
     ]
     return any(kw in text for kw in keywords)

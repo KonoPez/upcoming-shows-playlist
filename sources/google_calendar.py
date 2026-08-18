@@ -14,11 +14,9 @@ The URL looks like:
 """
 
 import logging
-from datetime import date, datetime
-from typing import Optional
-
 import requests
-from icalendar import Calendar
+from datetime import date, datetime
+from icalendar import Calendar, Event
 
 from artist_resolver import extract_artist_from_calendar_title, is_likely_concert, split_artist_names
 from sources.models import Concert
@@ -34,12 +32,10 @@ class GoogleCalendarClient:
         try:
             resp = requests.get(self.ics_url, timeout=30)
             resp.raise_for_status()
+            cal = Calendar.from_ical(resp.content)
         except requests.RequestException as e:
             logger.error(f'Failed to fetch Google Calendar ICS: {e}')
             return []
-
-        try:
-            cal = Calendar.from_ical(resp.content)
         except Exception as e:
             logger.error(f'Failed to parse Google Calendar ICS: {e}')
             return []
@@ -51,7 +47,7 @@ class GoogleCalendarClient:
         logger.info(f'Google Calendar: {len(concerts)} concert-like events found')
         return concerts
 
-    def _parse(self, component, start_date: date, end_date: date) -> list[Concert]:
+    def _parse(self, component: Event, start_date: date, end_date: date) -> list[Concert]:
         try:
             summary = str(component.get('SUMMARY', ''))
             description = str(component.get('DESCRIPTION', ''))
@@ -76,8 +72,7 @@ class GoogleCalendarClient:
             location = str(component.get('LOCATION', 'Unknown Venue'))
 
             # Bills are written headliner-first ("Headliner w/ Support1, Support2"),
-            # so everything after the first name is a supporting act. Same
-            # convention TicketmasterClient.get_local_events uses for attractions.
+            # so everything after the first name is a supporting act.
             return [
                 Concert(
                     event_name=summary,

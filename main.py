@@ -23,7 +23,8 @@ import requests
 from config import config, APP_DIR
 from cache import Cache
 from artist_resolver import resolve_artist
-from sources.models import Artist, Concert, Track, normalize_track_name
+from sources.models import Artist, Concert, Track
+from track_names import normalize_track_name
 from sources.apple_calendar import AppleCalendarClient
 from sources.google_calendar import GoogleCalendarClient
 from spotify_client.client import SpotifyClient, deduplicate_tracks
