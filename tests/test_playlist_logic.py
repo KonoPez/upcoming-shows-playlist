@@ -11,6 +11,7 @@ from sources.models import Concert, Track
 from playlist_logic.weighting import (
     HALF_LIFE_DAYS,
     HEADLINER_BONUS,
+    MIN_ARTIST_BUDGET_MS,
     allocate_slots,
     compute_artist_weights,
     concert_weight,
@@ -251,6 +252,87 @@ class TestAllocateSlots:
 
     def test_zero_total_weight_returns_empty(self):
         assert allocate_slots({'a': 0.0, 'b': 0.0}, target_duration_ms=_TARGET_MS) == {}
+
+
+# ── allocate_slots (min_budget_ms floor) ──────────────────────────────────────
+
+class TestAllocateSlotsMinBudget:
+    def test_artist_below_floor_is_dropped(self):
+        # 'tiny' earns a fraction of a second out of 70 minutes — not enough to
+        # justify the whole track it would otherwise be handed.
+        weights = {'big': 100.0, 'tiny': 0.001}
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert set(slots) == {'big'}
+
+    def test_artist_at_floor_is_kept(self):
+        # Weighted so 'small' lands just above MIN_ARTIST_BUDGET_MS.
+        share = (MIN_ARTIST_BUDGET_MS + 1_000) / _TARGET_MS
+        weights = {'big': 1.0 - share, 'small': share}
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert set(slots) == {'big', 'small'}
+        assert slots['small'] >= MIN_ARTIST_BUDGET_MS
+
+    def test_freed_budget_is_redistributed_to_survivors(self):
+        weights = {'a': 10.0, 'b': 10.0, 'tiny': 0.001}
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert sum(slots.values()) == _TARGET_MS
+        assert slots['a'] + slots['b'] == _TARGET_MS
+
+    def test_survivors_keep_their_relative_shares(self):
+        weights = {'heavy': 3.0, 'light': 1.0, 'tiny': 0.0001}
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert slots['heavy'] == pytest.approx(3 * slots['light'], rel=1e-6)
+
+    def test_borderline_artist_is_rescued_by_redistribution(self):
+        # 'small' and 'smaller' both start below the floor, so dropping every
+        # offender at once would lose them both. Evicting only the smallest and
+        # redistributing lifts 'small' clear of the floor, so it keeps its slot.
+        weights = {'a': 1.0, 'b': 1.0, 'small': 0.235, 'smaller': 0.230}
+        # Scaled to the floor so this stays valid whatever the floor is set to.
+        target = 10 * MIN_ARTIST_BUDGET_MS
+
+        initial = allocate_slots(weights, target)
+        assert initial['small'] < MIN_ARTIST_BUDGET_MS
+        assert initial['smaller'] < initial['small']
+
+        slots = allocate_slots(weights, target_duration_ms=target, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert set(slots) == {'a', 'b', 'small'}
+        assert slots['small'] >= MIN_ARTIST_BUDGET_MS
+
+    def test_evicts_lowest_allocation_first(self):
+        # Of the two artists under the floor, the smaller one is the one to go.
+        weights = {'a': 1.0, 'b': 1.0, 'small': 0.235, 'smaller': 0.230}
+        slots = allocate_slots(weights, target_duration_ms=10 * MIN_ARTIST_BUDGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert 'smaller' not in slots
+        assert 'small' in slots
+
+    def test_every_survivor_still_clears_the_floor(self):
+        # The loop only stops once the smallest survivor clears the floor.
+        weights = {'a': 5.0, 'b': 1.0, 'c': 0.01, 'd': 0.005}
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert slots
+        assert all(budget >= MIN_ARTIST_BUDGET_MS for budget in slots.values())
+
+    def test_nobody_above_floor_keeps_the_heaviest_artist(self):
+        # A 300-artist bill against a 60-second target: everyone is below the
+        # floor, but an empty playlist would be worse than one artist.
+        weights = {f'a{i}': 1.0 for i in range(300)}
+        weights['headliner'] = 2.0
+        slots = allocate_slots(weights, target_duration_ms=60_000, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert slots == {'headliner': 60_000}
+
+    def test_no_artist_below_floor_leaves_allocation_untouched(self):
+        weights = {'a': 1.0, 'b': 1.0, 'c': 1.0}
+        assert (allocate_slots(weights, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+                == allocate_slots(weights, target_duration_ms=_TARGET_MS))
+
+    def test_empty_weights_returns_empty(self):
+        assert allocate_slots({}, target_duration_ms=_TARGET_MS, min_budget_ms=MIN_ARTIST_BUDGET_MS) == {}
+
+    def test_single_artist_below_floor_still_gets_full_budget(self):
+        # One artist, tiny target: dropping them would leave nothing at all.
+        slots = allocate_slots({'only': 1.0}, target_duration_ms=10_000, min_budget_ms=MIN_ARTIST_BUDGET_MS)
+        assert slots == {'only': 10_000}
 
 
 # ── _parse_release_date ───────────────────────────────────────────────────────

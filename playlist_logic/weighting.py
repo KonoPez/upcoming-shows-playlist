@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 HALF_LIFE_DAYS = 21.0
 _LAMBDA = math.log(2) / HALF_LIFE_DAYS
-HEADLINER_BONUS = 1.5   # headliners receive 1.5× the base proximity weight vs openers
+HEADLINER_BONUS = 1.5  
+MIN_ARTIST_BUDGET_MS = 120_000
 
 
 def concert_weight(days_until: int) -> float:
@@ -65,14 +66,14 @@ def compute_artist_weights(
     return {aid: w for aid, w in weights.items() if w > 0}
 
 
-def allocate_slots(
+def _proportional_split(
     weights: dict[str, float],
     target_duration_ms: int,
 ) -> dict[str, int]:
     """
-    Distribute `target_duration_ms` across artists proportional to their weights.
-    Every artist with a non-zero weight receives a budget.
-    Returns: {spotify_artist_id: duration_budget_ms}
+    Split `target_duration_ms` across artists in proportion to their weights.
+    Hamilton's method (largest remainder) distributes the rounding so the
+    budgets sum to the target exactly.
     """
     if not weights:
         return {}
@@ -81,12 +82,9 @@ def allocate_slots(
     if total_weight == 0.0:
         return {}
 
-    # Exact proportional allocation
     exact = {aid: (w / total_weight) * target_duration_ms for aid, w in weights.items()}
-
     floors = {aid: math.floor(v) for aid, v in exact.items()}
 
-    # Hamilton's method: distribute remaining ms by largest fractional remainder
     remainders = {aid: exact[aid] - floors[aid] for aid in exact}
     leftover = target_duration_ms - sum(floors.values())
 
@@ -96,8 +94,43 @@ def allocate_slots(
         floors[aid] += 1
         leftover -= 1
 
+    return floors
+
+
+def allocate_slots(
+    weights: dict[str, float],
+    target_duration_ms: int,
+    min_budget_ms: int = 0,
+) -> dict[str, int]:
+    """
+    Distribute `target_duration_ms` across artists proportional to their weights.
+    Every artist with a non-zero weight receives a budget.
+
+    `min_budget_ms` imposes a floor: while any artist holds less than it, the one
+    with the *lowest* allocation is evicted and the target re-split across the
+    survivors, handing the freed time back in proportion to their weights.
+    The floor is off by default because discovery depends on its absence: it
+    guarantees a slot to every artist it selects.
+
+    Returns: {spotify_artist_id: duration_budget_ms} for the survivors.
+    """
+    slots = _proportional_split(weights, target_duration_ms)
+
+    while min_budget_ms > 0 and slots:
+        smallest = min(slots, key=lambda aid: (slots[aid], aid))
+        if slots[smallest] >= min_budget_ms:
+            break
+        
+        if len(slots) == 1:
+            break
+
+        del slots[smallest]
+        slots = _proportional_split(
+            {aid: weights[aid] for aid in slots}, target_duration_ms
+        )
+
     logger.debug('Duration budget allocation:')
-    for aid, budget in sorted(floors.items(), key=lambda x: -x[1]):
+    for aid, budget in sorted(slots.items(), key=lambda x: -x[1]):
         logger.debug(f'  {aid}: {budget // 60_000}m budget (weight={weights.get(aid, 0):.3f})')
 
-    return floors
+    return slots

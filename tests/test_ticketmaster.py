@@ -140,6 +140,44 @@ class TestBestEvent:
     def test_empty_events_returns_none(self):
         assert self._client()._best_event([], 'Good Kid', 'The Fillmore') is None
 
+    def _festival(self, event_name, artist_names, venue_name="High Noon Saloon"):
+        return {
+            'name': event_name,
+            '_embedded': {
+                'attractions': [{'name': n} for n in artist_names],
+                'venues': [{'name': venue_name}],
+            },
+        }
+
+    def test_festival_matched_by_event_name(self):
+        # The calendar title names the event, not any artist on the bill.
+        client = self._client()
+        events = [self._festival('Homiefest ', ['Remo Drive', 'Worry Club'])]
+        result = client._best_event(events, 'homiefest', 'High Noon Saloon')
+        assert result is not None
+
+    def test_festival_event_name_alone_is_not_enough(self):
+        # 7 points without a venue match falls below MIN_MATCH_SCORE.
+        client = self._client()
+        events = [self._festival('Homiefest', ['Remo Drive'], venue_name='The Fillmore')]
+        result = client._best_event(events, 'homiefest', 'High Noon Saloon')
+        assert result is None
+
+    def test_attraction_match_beats_event_name_match(self):
+        client = self._client()
+        by_name = self._festival('Good Kid Fest', ['Some Other Artist'])
+        by_billing = self._festival('A Different Fest', ['Good Kid'])
+        result = client._best_event(
+            [by_name, by_billing], 'Good Kid', 'High Noon Saloon'
+        )
+        assert result is by_billing
+
+    def test_unnamed_attraction_does_not_match_everything(self):
+        client = self._client()
+        events = [self._festival('Some Other Fest', [''])]
+        result = client._best_event(events, 'Good Kid', 'High Noon Saloon')
+        assert result is None
+
 
 # ── TicketmasterClient._extract_openers ───────────────────────────────────────
 
@@ -195,6 +233,22 @@ class TestExtractOpeners:
         event = self._event([{'name': 'Good Kid'}, {'name': 'INOHA'}])
         openers = client._extract_openers(event, 'Good Kid', date(2026, 4, 26), 'The Fillmore')
         assert openers[0].tm_spotify_id == ''
+
+    def test_festival_returns_whole_bill_as_openers(self):
+        # No attraction is the festival, so every act on it is a supporting act.
+        client = self._client()
+        event = self._event([
+            {'name': 'Remo Drive'},
+            {'name': 'Worry Club'},
+            {'name': 'Equipment'},
+        ])
+        openers = client._extract_openers(
+            event, 'homiefest', date(2026, 9, 5), 'High Noon Saloon'
+        )
+        assert [o.artist_name for o in openers] == [
+            'Remo Drive', 'Worry Club', 'Equipment'
+        ]
+        assert all(o.is_opener for o in openers)
 
     def test_empty_attractions_returns_empty(self):
         client = self._client()

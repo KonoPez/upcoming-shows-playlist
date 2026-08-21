@@ -29,7 +29,11 @@ from sources.apple_calendar import AppleCalendarClient
 from sources.google_calendar import GoogleCalendarClient
 from spotify_client.client import SpotifyClient, deduplicate_tracks
 from spotify_client.auth import get_spotify_client
-from playlist_logic.weighting import compute_artist_weights, allocate_slots
+from playlist_logic.weighting import (
+    MIN_ARTIST_BUDGET_MS,
+    allocate_slots,
+    compute_artist_weights,
+)
 from playlist_logic.scoring import select_tracks_for_artist
 from playlist_logic.discovery_weighting import (
     compute_artist_familiarity_scores,
@@ -378,7 +382,15 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     slots = allocate_slots(
         weights,
         target_duration_ms=config.playlist_target_duration_minutes * 60_000,
+        min_budget_ms=MIN_ARTIST_BUDGET_MS,
     )
+
+    # Artists whose share was too small to be worth a track are dropped here,
+    # before any discography is fetched, so the selection stage only ever sees
+    # budgets it can honour. Say so out loud — an artist silently missing from
+    # the playlist looks like a resolution bug.
+    for artist_id in sorted(weights.keys() - slots.keys(), key=lambda aid: artists[aid].name):
+        logger.info(f'  {artists[artist_id].name}: dropped, share below the minimum budget')
 
     # 6. Get user familiarity from Spotify API
     logger.info('Fetching Spotify listening history…')

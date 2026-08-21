@@ -28,6 +28,12 @@ LOCAL_EVENTS_PAGE_SIZE = 100       # results per page
 LOCAL_EVENTS_MAX_PAGES = 5         # cap at 500 events; enough for any metro area
 CALENDAR_SOURCES = {'apple_calendar', 'google_calendar'}
 
+# Event match scoring. A candidate must reach MIN_MATCH_SCORE to be accepted.
+ATTRACTION_MATCH_SCORE = 10   # the headliner is billed on the event — decisive on its own
+EVENT_NAME_MATCH_SCORE = 7    # festival-style: the title names the bill, not an artist
+VENUE_MATCH_BONUS = 5
+MIN_MATCH_SCORE = 10
+
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
 
@@ -43,6 +49,14 @@ def _venue_matches(cal_venue: str, tm_venue: str) -> bool:
     # Empty or the calendar fallback sentinel both mean "no location data"
     if not a or not b or a == 'unknownvenue':
         return True   # can't disprove — give benefit of the doubt
+    return a in b or b in a
+
+
+def _names_overlap(a: str, b: str) -> bool:
+    """True when either name contains the other, ignoring case and padding."""
+    a, b = a.lower().strip(), b.lower().strip()
+    if not a or not b:
+        return False   # an unnamed attraction matches nothing, not everything
     return a in b or b in a
 
 
@@ -320,28 +334,23 @@ class TicketmasterClient:
     ) -> Optional[dict]:
         """
         Score each TM event and return the one most likely matching the
-        calendar entry. Requires the headliner to appear in the attraction list;
-        a venue match is a bonus.
+        calendar entry.
         """
-        best, best_score = None, -1
+        best, best_score = None, MIN_MATCH_SCORE - 1
 
         for ev in events:
             attractions = ev.get('_embedded', {}).get('attractions', [])
-            names_lower = [a.get('name', '').lower() for a in attractions]
 
-            headliner_lower = headliner.lower()
-            found_headliner = any(
-                headliner_lower in n or n in headliner_lower
-                for n in names_lower
-            )
-            if not found_headliner:
-                continue   # skip events where the headliner isn't listed
-
-            score = 10   # headliner present
+            if any(_names_overlap(headliner, a.get('name', '')) for a in attractions):
+                score = ATTRACTION_MATCH_SCORE
+            elif _names_overlap(headliner, ev.get('name', '')):
+                score = EVENT_NAME_MATCH_SCORE
+            else:
+                continue   # nothing ties this event to the calendar entry
 
             tm_venues = ev.get('_embedded', {}).get('venues', [])
             if tm_venues and _venue_matches(venue, tm_venues[0].get('name', '')):
-                score += 5
+                score += VENUE_MATCH_BONUS
 
             if score > best_score:
                 best_score = score
@@ -356,7 +365,11 @@ class TicketmasterClient:
         event_date: date,
         venue: str,
     ) -> list[Concert]:
-        """Build Concert objects for every attraction that is not the headliner."""
+        """
+        Build Concert objects for every attraction that is not the headliner.
+        On a show matched by event name, no attraction is the headliner, so
+        the whole bill comes back as openers. 
+        """
         event_name = event.get('name', '')
         attractions = event.get('_embedded', {}).get('attractions', [])
         openers: list[Concert] = []
