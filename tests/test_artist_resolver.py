@@ -10,6 +10,7 @@ import pytest
 
 from artist_resolver import (
     RESOLUTION_TTL,
+    SEARCH_LIMIT,
     UNRESOLVED_SENTINEL,
     UNRESOLVED_TTL,
     _normalize,
@@ -239,23 +240,91 @@ class TestSearchSpotify:
         sp.search.return_value = {'artists': {'items': items or []}}
         return sp
 
-    def test_query_uses_quoted_artist_name(self):
+    def test_first_query_uses_quoted_artist_name(self):
         # Quoting prevents Spotify's Lucene parser from splitting on commas
         # e.g. "Black Country, New Road" must not be split into separate terms
         sp = self._sp()
         _search_spotify("Black Country, New Road", sp)
-        sp.search.assert_called_once_with(
-            q='artist:"Black Country, New Road"',
-            type='artist',
-            limit=10,
-        )
+        assert sp.search.call_args_list[0].kwargs == {
+            'q': 'artist:"Black Country, New Road"',
+            'type': 'artist',
+            'limit': SEARCH_LIMIT,
+        }
 
-    def test_query_quoted_for_simple_names_too(self):
+    def test_first_query_quoted_for_simple_names_too(self):
         sp = self._sp()
         _search_spotify("Mitski", sp)
-        sp.search.assert_called_once_with(
-            q='artist:"Mitski"', type='artist', limit=10
-        )
+        assert sp.search.call_args_list[0].kwargs == {
+            'q': 'artist:"Mitski"', 'type': 'artist', 'limit': SEARCH_LIMIT
+        }
+
+    def test_search_limit_is_ten(self):
+        # Spotify answers a larger search limit with 400 "Invalid limit" for
+        # this app, so recall has to come from a second query, not a wider one.
+        assert SEARCH_LIMIT == 10
+
+    def test_exact_match_skips_the_fallback_query(self):
+        sp = self._sp(items=[{'id': 'm1', 'name': 'Mitski'}])
+        assert _search_spotify("Mitski", sp) == 'm1'
+        assert sp.search.call_count == 1
+
+    def test_unquoted_fallback_query_runs_when_quoted_finds_no_full_match(self):
+        # The quoted phrase query buries a short generic name under every longer
+        # name containing it; the unquoted query ranks the exact name first.
+        def responses(q, **kwargs):
+            if q.startswith('artist:"'):
+                return {'artists': {'items': [
+                    {'id': 'raf', 'name': 'The Central Band Of The R.A.F.'},
+                    {'id': 'legion', 'name': 'The Central Band of The Royal British Legion'},
+                ]}}
+            return {'artists': {'items': [{'id': 'band', 'name': 'The Central'}]}}
+
+        sp = MagicMock()
+        sp.search.side_effect = responses
+
+        assert _search_spotify("The Central", sp) == 'band'
+        assert sp.search.call_args_list[1].kwargs['q'] == 'The Central'
+
+    def test_longer_name_containing_the_query_is_not_a_match(self):
+        # Regression: "The Central" resolved to a military concert band whose
+        # name merely contains it. One word in seven is not corroboration.
+        sp = self._sp(items=[
+            {'id': 'raf', 'name': 'The Central Band Of The R.A.F.'},
+        ])
+        assert _search_spotify("The Central", sp) is None
+
+    def test_partial_match_kept_when_it_covers_most_of_the_name(self):
+        # Support acts are routinely billed under a shortened name.
+        sp = self._sp(items=[
+            {'id': 'gw', 'name': 'Greg Wheeler and the Poly Mall Cops'},
+        ])
+        assert _search_spotify("Poly Mall Cops", sp) == 'gw'
+
+    def test_partial_match_must_align_on_word_boundaries(self):
+        # Regression: "e.t." normalises to "e t", which is a substring of
+        # "cage the elephant" — a coincidence of letters, not a name match.
+        sp = self._sp(items=[{'id': 'cte', 'name': 'Cage The Elephant'}])
+        assert _search_spotify("E.T.", sp) is None
+
+    def test_exact_match_beats_a_partial_one(self):
+        sp = self._sp(items=[
+            {'id': 'paymer', 'name': 'Jules Paymer'},
+            {'id': 'jules',  'name': 'Jules'},
+        ])
+        assert _search_spotify("Jules", sp) == 'jules'
+
+    def test_failed_fallback_query_leaves_the_quoted_match_alone(self):
+        def responses(q, **kwargs):
+            if q.startswith('artist:"'):
+                return {'artists': {'items': [
+                    {'id': 'gw', 'name': 'Greg Wheeler and the Poly Mall Cops'},
+                ]}}
+            raise Exception('network is down')
+
+        sp = MagicMock()
+        sp.search.side_effect = responses
+
+        assert _search_spotify("Poly Mall Cops", sp) == 'gw'
 
     def test_exact_name_match_returned(self):
         sp = self._sp(items=[

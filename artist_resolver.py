@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 RESOLUTION_TTL = 90 * 24 * 3600    # 90 days — artist IDs rarely change
 UNRESOLVED_TTL  =  1 * 24 * 3600   # 1 day  — retry failures quickly after bug fixes
 UNRESOLVED_SENTINEL = '__UNRESOLVED__'
+SEARCH_LIMIT = 10
+EXACT_NAME_SCORE = 200.0
+NORMALIZED_NAME_SCORE = 100.0
+PARTIAL_NAME_SCORE = 50.0
+MIN_PARTIAL_COVERAGE = 0.25
 
 # A bare "&"/"and" acting as a list separator. "and the …" is excluded because
 # that shape is almost always part of a band name, not a boundary between acts.
@@ -91,46 +96,80 @@ def _verify_spotify_id(spotify_id: str, sp: spotipy.Spotify) -> Optional[str]:
         return None
 
 
-def _search_spotify(name: str, sp: spotipy.Spotify) -> Optional[str]:
-    """Search Spotify for an artist and return the best-match ID, or None."""
-    # Quote the name so Spotify's Lucene parser treats it as a phrase rather than
-    # splitting on commas or other punctuation (e.g. "Black Country, New Road").
+def _match_score(name: str, norm_query: str, candidate_name: str) -> float:
+    """Score how well a search result's name matches the name being resolved."""
+    if candidate_name.lower() == name.lower():
+        return EXACT_NAME_SCORE
+
+    norm_candidate = _normalize(candidate_name)
+    if norm_candidate == norm_query:
+        return NORMALIZED_NAME_SCORE
+
+    query_words = norm_query.split()
+    candidate_words = norm_candidate.split()
+    shorter, longer = sorted((query_words, candidate_words), key=len)
+    if not shorter or not _contains_words(longer, shorter):
+        return 0.0
+
+    coverage = len(shorter) / len(longer)
+    if coverage < MIN_PARTIAL_COVERAGE:
+        return 0.0
+    return PARTIAL_NAME_SCORE * coverage
+
+
+def _contains_words(words: list[str], run: list[str]) -> bool:
+    """Is `run` present in `words` as a consecutive run?"""
+    return any(
+        words[i:i + len(run)] == run
+        for i in range(len(words) - len(run) + 1)
+    )
+
+
+def _search_candidates(query: str, name: str, sp: spotipy.Spotify) -> list[dict]:
+    """Run one Spotify artist search, returning the result items (empty on error)."""
     try:
-        results = sp.search(q=f'artist:"{name}"', type='artist', limit=10)
+        results = sp.search(q=query, type='artist', limit=SEARCH_LIMIT)
     except Exception as e:
         logger.error(f'Spotify search failed for "{name}": {e}')
-        return None
+        return []
+    return results.get('artists', {}).get('items', [])
 
-    candidates = results.get('artists', {}).get('items', [])
-    if not candidates:
-        return None
 
+def _best_match(name: str, candidates: list[dict]) -> tuple[Optional[str], float]:
+    """Pick the highest-scoring candidate, returning its ID and score."""
     norm_query = _normalize(name)
     best_id, best_score = None, -1.0
 
     for c in candidates:
-        candidate_name = c.get('name', '')
         candidate_id = c.get('id', '')
-
         if not candidate_id:
             continue
 
-        norm_candidate = _normalize(candidate_name)
-
-        if candidate_name.lower() == name.lower():
-            score = 200.0
-        elif norm_candidate == norm_query:
-            score = 100.0
-        elif norm_query in norm_candidate or norm_candidate in norm_query:
-            score = 50.0
-        else:
-            score = 0.0
-
+        score = _match_score(name, norm_query, c.get('name', ''))
         if score > best_score:
             best_score = score
             best_id = candidate_id
 
-    return best_id if best_score >= 1.0 else None
+    return best_id, best_score
+
+
+def _search_spotify(name: str, sp: spotipy.Spotify) -> Optional[str]:
+    """Search Spotify for an artist and return the best-match ID, or None."""
+    # Quote the name so Spotify's Lucene parser treats it as a phrase rather than
+    # splitting on commas or other punctuation (e.g. "Black Country, New Road").
+    candidates = _search_candidates(f'artist:"{name}"', name, sp)
+    best_id, best_score = _best_match(name, candidates)
+
+    # The quoted phrase query ranks by how well the whole field matches, which
+    # buries a short generic name under every longer name containing it
+    # The unquoted query puts the exact name first. 
+    if best_score < NORMALIZED_NAME_SCORE:
+        fallback = _search_candidates(name, name, sp)
+        fallback_id, fallback_score = _best_match(name, fallback)
+        if fallback_score > best_score:
+            best_id, best_score = fallback_id, fallback_score
+
+    return best_id if best_score > 0.0 else None
 
 
 # ── Calendar event parsing ────────────────────────────────────────────────────
