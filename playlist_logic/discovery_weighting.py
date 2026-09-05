@@ -36,35 +36,6 @@ SIMILARITY_W        = 0.20
 ENJOYMENT_EXPONENT  = 1.5   # steeper decay toward low-scoring artists
 
 
-def compute_artist_familiarity_scores(
-    candidate_ids: list[str],
-    top_scores: dict[str, float],
-    play_counts: dict[str, int],
-) -> dict[str, float]:
-    """
-    Return {artist_id: familiarity_score} for each candidate.
-
-    personal_familiarity = max(spotify_top_score, play_history_score)
-
-    play_history_score is log-normalized within the candidate set so that
-    an artist with 3 plays scores meaningfully if every other candidate also
-    has few or zero plays. Normalization against the global maximum would
-    unfairly penalize artists with modest play counts relative to the user's
-    most-listened-to artist overall.
-    """
-    candidate_counts = [play_counts.get(aid, 0) for aid in candidate_ids]
-    max_count = max(candidate_counts, default=1)
-    log_max = math.log(max_count + 1) if max_count > 0 else 1
-
-    familiarity: dict[str, float] = {}
-    for aid in candidate_ids:
-        api_score  = top_scores.get(aid, 0.0)
-        play_score =  math.log(play_counts.get(aid, 0) + 1) / log_max
-        familiarity[aid] = max(api_score, play_score)
-
-    return familiarity
-
-
 def _normalize_popularity(raw_listeners: dict[str, int]) -> dict[str, float]:
     """
     Log-normalize Last.fm listener counts across the candidate set.

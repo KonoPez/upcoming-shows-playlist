@@ -21,6 +21,7 @@ ARTIST_NAME_TTL = 90 * 24 * 3600     # 90 days — canonical names change about 
 FAMILIARITY_TTL = 6 * 3600            # 6 hours — top tracks don't shift meaningfully intra-day
 RECENTLY_PLAYED_TTL = 5 * 60          # 5 min — deduplicates the two callers within a single run
 API_DELAY = 0.1                        # 100 ms between calls
+TOP_ARTIST_RANK_SPAN = 0.30            # how far a tier's score decays from #1 to last
 MAX_ALBUMS_PER_ARTIST = 25            # most recent studio albums + singles
 
 # Album names that indicate the entire album is a non-studio recording.
@@ -142,6 +143,9 @@ def deduplicate_tracks(
 class ArtistTopScore(NamedTuple):
     name: str
     score: float
+
+
+_NO_TOP_SCORE = ArtistTopScore(name='', score=-1.0)   # sentinel for max() comparisons
 
 
 class SpotifyClient:
@@ -317,14 +321,23 @@ class SpotifyClient:
         Build a {artist_id: ArtistTopScore(name, score)} map from Spotify's
         top-artists API.  Mirrors get_user_familiarity but at the artist level.
 
-        Scores:
-          short_term top artists (≈4 weeks)   → 1.0
-          medium_term top artists (≈6 months) → 0.8
-          long_term top artists (years)        → 0.6
-        Artists in multiple lists get the highest score.
-        Cached for FAMILIARITY_TTL (6 h).
+        Each tier's score starts at its ceiling for the #1 artist and decays by
+        TOP_ARTIST_RANK_SPAN across the rest of the list:
+          short_term top artists (≈4 weeks)   → 1.0 … 0.7
+          medium_term top artists (≈6 months) → 0.8 … 0.5
+          long_term top artists (years)        → 0.6 … 0.3
+
+        The rank matters. Spotify returns these lists in listening order but a
+        flat per-tier score threw that away, so the artist you played twice this
+        month and the one you played two hundred times both scored 1.0 — on a
+        concert bill where most acts sit somewhere in the short-term fifty, that
+        collapsed the whole signal to a constant. Rank is free; it arrives in
+        the same response.
+
+        Artists in multiple lists get the highest score. Cached for
+        FAMILIARITY_TTL (6 h).
         """
-        cache_key = 'artist_top_scores_v2'
+        cache_key = 'artist_top_scores_v3'   # v2 stored flat per-tier scores
         cached = cache.get(cache_key)
         if cached is not None:
             # NamedTuples round-trip through JSON as lists; reconstruct
@@ -334,17 +347,23 @@ class SpotifyClient:
             }
 
         scores: dict[str, ArtistTopScore] = {}
-        for time_range, score in [
+        for time_range, ceiling in [
             ('short_term', 1.0),
             ('medium_term', 0.8),
             ('long_term', 0.6),
         ]:
             try:
                 result = self.sp.current_user_top_artists(limit=50, time_range=time_range)
-                for artist in result.get('items', []):
+                items = result.get('items', [])
+                last_rank = max(len(items) - 1, 1)
+                for rank, artist in enumerate(items):
                     aid  = artist.get('id')
                     name = artist.get('name', '')
-                    if aid and aid not in scores:
+                    score = ceiling - TOP_ARTIST_RANK_SPAN * (rank / last_rank)
+                    # A genuine max, not first-tier-wins: the rank-decayed bands
+                    # overlap, so #1 for the past six months outranks #50 for the
+                    # past four weeks.
+                    if aid and score > scores.get(aid, _NO_TOP_SCORE).score:
                         scores[aid] = ArtistTopScore(name=name, score=score)
                 time.sleep(API_DELAY)
             except Exception as e:

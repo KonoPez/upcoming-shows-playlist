@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from spotify_client.client import (
+    TOP_ARTIST_RANK_SPAN,
     SpotifyClient,
     album_type_rank,
     deduplicate_tracks,
@@ -589,3 +590,80 @@ class TestGetArtistNames:
         client.sp.artist.side_effect = None
         client.sp.artist.return_value = {'id': 'a1', 'name': 'Combat'}
         assert client.get_artist_names(['a1'], cache) == {'a1': 'Combat'}
+
+
+# ── get_artist_top_scores (rank-aware) ────────────────────────────────────────
+
+def _top_artists_response(names_by_range):
+    """Serve current_user_top_artists from {time_range: [artist_name, ...]}."""
+    def _fetch(limit=50, time_range='short_term'):
+        return {'items': [
+            {'id': n, 'name': n} for n in names_by_range.get(time_range, [])
+        ]}
+    return _fetch
+
+
+class TestGetArtistTopScores:
+    def test_rank_one_gets_the_tier_ceiling(self, client, cache):
+        client.sp.current_user_top_artists = _top_artists_response(
+            {'short_term': ['first', 'second', 'third']}
+        )
+        scores = client.get_artist_top_scores(cache)
+        assert abs(scores['first'].score - 1.0) < 1e-9
+
+    def test_last_rank_falls_a_full_span_below_the_ceiling(self, client, cache):
+        client.sp.current_user_top_artists = _top_artists_response(
+            {'short_term': ['first', 'second', 'third']}
+        )
+        scores = client.get_artist_top_scores(cache)
+        assert abs(scores['third'].score - (1.0 - TOP_ARTIST_RANK_SPAN)) < 1e-9
+
+    def test_score_decreases_with_rank(self, client, cache):
+        # The whole point: artists sharing a tier must not share a score.
+        names = [f'a{i}' for i in range(50)]
+        client.sp.current_user_top_artists = _top_artists_response({'short_term': names})
+        scores = client.get_artist_top_scores(cache)
+        ranked = [scores[n].score for n in names]
+        assert all(a > b for a, b in zip(ranked, ranked[1:]))
+
+    def test_single_item_list_gets_the_ceiling(self, client, cache):
+        client.sp.current_user_top_artists = _top_artists_response({'short_term': ['solo']})
+        scores = client.get_artist_top_scores(cache)
+        assert abs(scores['solo'].score - 1.0) < 1e-9
+
+    def test_higher_band_wins_across_overlapping_tiers(self, client, cache):
+        # 'x' is last of fifty short-term (1.0 - span = 0.70) but #1 medium-term
+        # (0.80). The bands overlap, so first-tier-wins would understate it.
+        short = [f'a{i}' for i in range(49)] + ['x']
+        client.sp.current_user_top_artists = _top_artists_response(
+            {'short_term': short, 'medium_term': ['x', 'y']}
+        )
+        scores = client.get_artist_top_scores(cache)
+        assert abs(scores['x'].score - 0.8) < 1e-9
+
+    def test_lower_band_does_not_displace_a_higher_one(self, client, cache):
+        client.sp.current_user_top_artists = _top_artists_response(
+            {'short_term': ['x', 'y'], 'long_term': ['x', 'y']}
+        )
+        scores = client.get_artist_top_scores(cache)
+        assert abs(scores['x'].score - 1.0) < 1e-9
+
+    def test_name_is_kept_alongside_the_score(self, client, cache):
+        client.sp.current_user_top_artists = _top_artists_response({'short_term': ['solo']})
+        assert client.get_artist_top_scores(cache)['solo'].name == 'solo'
+
+    def test_second_call_is_served_from_cache(self, client, cache):
+        client.sp.current_user_top_artists = _top_artists_response({'short_term': ['a', 'b']})
+        first = client.get_artist_top_scores(cache)
+
+        client.sp.current_user_top_artists = _top_artists_response({'short_term': ['z']})
+        assert client.get_artist_top_scores(cache) == first
+
+    def test_api_failure_is_survivable(self, client, cache):
+        def _boom(limit=50, time_range='short_term'):
+            if time_range == 'short_term':
+                raise RuntimeError('429')
+            return {'items': [{'id': 'm', 'name': 'm'}]}
+        client.sp.current_user_top_artists = _boom
+        scores = client.get_artist_top_scores(cache)
+        assert 'm' in scores and abs(scores['m'].score - 0.8) < 1e-9

@@ -22,12 +22,15 @@ from playlist_logic.discovery_weighting import (
     ENJOYMENT_EXPONENT,
     FAMILIARITY_W,
     POPULARITY_W,
-    compute_artist_familiarity_scores,
     compute_discovery_weights,
     score_artist_enjoyment,
     select_discovery_artists,
 )
-from playlist_logic.weighting import allocate_slots, concert_weight
+from playlist_logic.weighting import (
+    allocate_slots,
+    compute_artist_familiarity_scores,
+    concert_weight,
+)
 from sources.models import Artist, Concert
 from sources.ticketmaster import TicketmasterClient, _concert_from_dict, _concerts_from_event
 
@@ -153,12 +156,22 @@ class TestComputeArtistFamiliarityScores:
         )
         assert abs(scores['a1'] - 1.0) < 1e-9
 
-    def test_max_of_spotify_and_play_history_taken(self):
-        # Spotify says 0.3; play history (5/5 max) says 1.0 → use 1.0
+    def test_both_signals_are_blended_not_maxed(self):
+        # Spotify says 0.3; play history (5/5 candidate max) says 1.0. The old
+        # behaviour took the max and reported 1.0, discarding the disagreement;
+        # the blend lands between the two.
         scores = compute_artist_familiarity_scores(
             ['a1'], {'a1': 0.3}, {'a1': 5}
         )
+        assert 0.3 < scores['a1'] < 1.0
+
+    def test_discovery_candidates_are_unaffected_by_the_blend(self):
+        # Almost no discovery candidate appears in the user's top-artist lists,
+        # so their score stays exactly the play-history term — the blend cannot
+        # push them under the min-score floor.
+        scores = compute_artist_familiarity_scores(['a1', 'a2'], {}, {'a1': 8, 'a2': 4})
         assert abs(scores['a1'] - 1.0) < 1e-9
+        assert abs(scores['a2'] - math.log(5) / math.log(9)) < 1e-9
 
     def test_artists_not_in_top_scores_or_plays_score_zero(self):
         scores = compute_artist_familiarity_scores(['a1', 'a2', 'a3'], {'a2': 0.5}, {})

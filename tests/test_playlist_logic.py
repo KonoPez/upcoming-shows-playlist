@@ -9,12 +9,17 @@ import pytest
 
 from sources.models import Concert, Track
 from playlist_logic.weighting import (
+    FAMILIARITY_PENALTY,
+    PLAY_LOG_W,
+    TOP_SCORE_W,
     HALF_LIFE_DAYS,
     HEADLINER_BONUS,
     MIN_ARTIST_BUDGET_MS,
     allocate_slots,
+    compute_artist_familiarity_scores,
     compute_artist_weights,
     concert_weight,
+    novelty_multiplier,
 )
 from playlist_logic.scoring import (
     LASTFM_W,
@@ -73,139 +78,177 @@ class TestConcertWeight:
         assert concert_weight(0) > concert_weight(1) > concert_weight(10) > concert_weight(30) > concert_weight(90)
 
 
-# ── compute_artist_weights ────────────────────────────────────────────────────
+# ── novelty_multiplier ────────────────────────────────────────────────────────
 
-class TestComputeArtistWeights:
-    def test_single_headliner_concert(self):
-        weights = compute_artist_weights({'a1': [_concert(10)]}, _TODAY)
-        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+class TestNoveltyMultiplier:
+    def test_unfamiliar_artist_is_unpenalised(self):
+        assert novelty_multiplier(0.0) == 1.0
 
-    def test_single_opener_concert(self):
-        weights = compute_artist_weights({'a1': [_concert(10, is_opener=True)]}, _TODAY)
-        assert abs(weights['a1'] - concert_weight(10)) < 1e-9
+    def test_maximum_familiarity_pays_the_full_penalty(self):
+        assert abs(novelty_multiplier(1.0) - (1.0 - FAMILIARITY_PENALTY)) < 1e-9
 
-    def test_multiple_concerts_for_same_artist_are_summed(self):
-        weights = compute_artist_weights({'a1': [_concert(10), _concert(20)]}, _TODAY)
-        expected = (concert_weight(10) + concert_weight(20)) * HEADLINER_BONUS
-        assert abs(weights['a1'] - expected) < 1e-9
+    def test_strictly_decreasing_in_familiarity(self):
+        values = [novelty_multiplier(f / 10) for f in range(11)]
+        assert all(a > b for a, b in zip(values, values[1:]))
 
-    def test_past_concerts_excluded(self):
-        weights = compute_artist_weights({'a1': [_concert(-1), _concert(-30)]}, _TODAY)
-        assert 'a1' not in weights
+    def test_out_of_range_input_is_clamped(self):
+        # A stray score outside 0–1 must not invert the weight or overshoot
+        # the intended floor.
+        assert novelty_multiplier(-5.0) == novelty_multiplier(0.0)
+        assert novelty_multiplier(5.0) == novelty_multiplier(1.0)
 
-    def test_todays_concert_is_included(self):
-        # A concert happening today is the most proximate possible — it must
-        # NOT be treated the same as a past show.
-        weights = compute_artist_weights({'a1': [_concert(0)]}, _TODAY)
-        assert 'a1' in weights
-        assert abs(weights['a1'] - concert_weight(0) * HEADLINER_BONUS) < 1e-9
+    def test_never_zeroes_an_artist_out(self):
+        assert novelty_multiplier(1.0) > 0.0
 
-    def test_mixed_past_and_future_only_sums_future(self):
-        weights = compute_artist_weights({'a1': [_concert(-5), _concert(10)]}, _TODAY)
-        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
-    def test_multiple_artists(self):
-        weights = compute_artist_weights({'a1': [_concert(7)], 'a2': [_concert(30)]}, _TODAY)
-        assert 'a1' in weights and 'a2' in weights
-        assert weights['a1'] > weights['a2']   # closer concert → heavier weight
+# ── compute_artist_familiarity_scores ─────────────────────────────────────────
 
-    def test_empty_input(self):
-        assert compute_artist_weights({}, _TODAY) == {}
+class TestComputeArtistFamiliarityScores:
+    def test_defaults_to_normalising_within_the_candidate_set(self):
+        # Discovery's mode: the most-played candidate anchors the scale, so a
+        # pool of barely-played unknowns still spreads across the range.
+        scores = compute_artist_familiarity_scores(['a1', 'a2'], {}, {'a1': 2, 'a2': 0})
+        assert scores['a1'] == 1.0
+        assert scores['a2'] == 0.0
 
-    def test_headliner_outweighs_opener_same_day(self):
-        # Same concert day — headliner should have a larger weight than opener.
-        weights = compute_artist_weights(
-            {'h': [_concert(14)], 'o': [_concert(14, is_opener=True)]}, _TODAY
+    def test_global_ceiling_keeps_a_lightly_played_artist_low(self):
+        # Prep's mode: two lifetime plays is not "familiar" just because the
+        # other artist on the bill has none.
+        play_counts = {'a1': 2, 'a2': 0, 'heavy': 500}
+        scores = compute_artist_familiarity_scores(
+            ['a1', 'a2'], {}, play_counts, normalize_against=list(play_counts)
         )
-        assert weights['h'] > weights['o']
-        assert abs(weights['h'] / weights['o'] - HEADLINER_BONUS) < 1e-9
+        assert scores['a1'] < 0.25
+        assert scores['a2'] == 0.0
 
-    def test_mixed_roles_bonus_applied_per_concert(self):
-        # Artist headlining in 11 days, opening in 33 days.
-        weights = compute_artist_weights(
-            {'a': [_concert(11), _concert(33, is_opener=True)]}, _TODAY
+    def test_global_ceiling_still_scores_the_most_played_artist_at_one(self):
+        play_counts = {'a1': 500, 'other': 12}
+        scores = compute_artist_familiarity_scores(
+            ['a1'], {}, play_counts, normalize_against=list(play_counts)
         )
-        expected = concert_weight(11) * HEADLINER_BONUS + concert_weight(33)
-        assert abs(weights['a'] - expected) < 1e-9
+        assert abs(scores['a1'] - 1.0) < 1e-9
 
+    def test_absent_from_top_lists_falls_back_to_play_history_alone(self):
+        # Most of the discovery pool. A missing top-artist entry is "no
+        # opinion", not a zero, so the play term is not diluted by it.
+        play_counts = {'a1': 500, 'a2': 0}
+        scores = compute_artist_familiarity_scores(['a1', 'a2'], {}, play_counts)
+        assert abs(scores['a1'] - 1.0) < 1e-9
+        assert scores['a2'] == 0.0
 
-def _manual_concert(days_until: int, event_name: str = 'Manual Show', is_opener: bool = False) -> Concert:
-    """Build a manual-source Concert a fixed number of days from _TODAY."""
-    return Concert(
-        event_name=event_name,
-        artist_name='Artist',
-        event_date=_TODAY + timedelta(days=days_until),
-        venue='Venue',
-        source='manual',
-        is_opener=is_opener,
-    )
-
-
-class TestComputeArtistWeightsManual:
-    """Manual-source concerts carry no source-specific weighting: every
-    appearance is weighted by proximity and role exactly as a calendar or
-    Ticketmaster one is."""
-
-    def test_single_manual_headliner_matches_non_manual_headliner(self):
-        weights = compute_artist_weights({'a1': [_manual_concert(10)]}, _TODAY)
-        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
-
-    def test_manual_bill_matches_identical_calendar_bill(self):
-        # The same 1-headliner/2-opener bill, once manual and once from a
-        # calendar, must produce identical weights — source is not a signal.
-        bill = {'h': False, 'o1': True, 'o2': True}
-        manual = compute_artist_weights(
-            {aid: [_manual_concert(10, event_name='Fest', is_opener=op)]
-             for aid, op in bill.items()},
-            _TODAY,
+    def test_both_signals_contribute_when_both_are_present(self):
+        # The complaint that motivated the blend: under `max`, a shared top
+        # score made these two identical however differently they were played.
+        play_counts = {'heavy': 200, 'light': 3, 'ceiling': 500}
+        scores = compute_artist_familiarity_scores(
+            ['heavy', 'light'],
+            {'heavy': 0.8, 'light': 0.8},
+            play_counts,
+            normalize_against=list(play_counts),
         )
-        calendar = compute_artist_weights(
-            {aid: [_concert(10, is_opener=op)] for aid, op in bill.items()},
-            _TODAY,
+        assert scores['heavy'] > scores['light']
+
+    def test_blend_matches_the_declared_weights(self):
+        play_counts = {'a1': 24, 'ceiling': 499}
+        scores = compute_artist_familiarity_scores(
+            ['a1'], {'a1': 0.9}, play_counts, normalize_against=list(play_counts)
         )
-        assert manual == calendar
+        play_score = math.log(25) / math.log(500)
+        expected = (TOP_SCORE_W * 0.9 + PLAY_LOG_W * play_score) / (TOP_SCORE_W + PLAY_LOG_W)
+        assert abs(scores['a1'] - expected) < 1e-9
 
-    def test_manual_bill_members_keep_full_per_concert_weight(self):
-        # One event (same date + event_name), 1 headliner + 2 openers, all
-        # manual. Sharing a bill must not shrink anyone's weight.
-        weights = compute_artist_weights({
-            'h':  [_manual_concert(10, event_name='Fest', is_opener=False)],
-            'o1': [_manual_concert(10, event_name='Fest', is_opener=True)],
-            'o2': [_manual_concert(10, event_name='Fest', is_opener=True)],
-        }, _TODAY)
-        assert abs(weights['h'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
-        assert abs(weights['o1'] - concert_weight(10)) < 1e-9
-        assert abs(weights['o2'] - concert_weight(10)) < 1e-9
+    def test_top_score_outweighs_play_history(self):
+        # Spotify's ranking sees every device across the whole window; the local
+        # log only sees what cron sampled, so it must not be the louder signal.
+        assert TOP_SCORE_W > PLAY_LOG_W
 
-    def test_sooner_manual_headliner_outweighs_later_calendar_headliner(self):
-        # A manual show 51 days out and a calendar show 61 days out: the
-        # sooner one must win, since proximity is the only thing separating them.
-        weights = compute_artist_weights({
-            'manual_hl':   [_manual_concert(51)],
-            'calendar_hl': [_concert(61)],
-        }, _TODAY)
-        assert weights['manual_hl'] > weights['calendar_hl']
+    def test_a_top_ranked_artist_is_not_dragged_down_to_the_play_term(self):
+        play_counts = {'a1': 0, 'ceiling': 500}
+        scores = compute_artist_familiarity_scores(
+            ['a1'], {'a1': 1.0}, play_counts, normalize_against=list(play_counts)
+        )
+        assert scores['a1'] >= TOP_SCORE_W
 
-    def test_separate_manual_events_do_not_dilute_each_other(self):
-        # Two distinct events (different event_name) on the same day, each
-        # with a single manual artist — neither should be diluted by the other.
-        weights = compute_artist_weights({
-            'a1': [_manual_concert(10, event_name='Event A')],
-            'a2': [_manual_concert(10, event_name='Event B')],
-        }, _TODAY)
-        assert abs(weights['a1'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
+    def test_stays_within_the_unit_range(self):
+        play_counts = {'a1': 500}
+        for top in (0.0, 0.5, 1.0):
+            scores = compute_artist_familiarity_scores(
+                ['a1'], {'a1': top}, play_counts, normalize_against=list(play_counts)
+            )
+            assert 0.0 <= scores['a1'] <= 1.0
+
+
+# ── compute_artist_weights (familiarity downweight) ───────────────────────────
+
+class TestArtistWeightsWithFamiliarity:
+    def test_omitting_familiarity_leaves_weights_untouched(self):
+        bill = {'a1': [_concert(10)], 'a2': [_concert(30, is_opener=True)]}
+        assert compute_artist_weights(bill, _TODAY) == compute_artist_weights(bill, _TODAY, None)
+
+    def test_empty_familiarity_leaves_weights_untouched(self):
+        bill = {'a1': [_concert(10)], 'a2': [_concert(30, is_opener=True)]}
+        assert compute_artist_weights(bill, _TODAY) == compute_artist_weights(bill, _TODAY, {})
+
+    def test_familiar_artist_is_downweighted(self):
+        bill = {'a1': [_concert(10)]}
+        base = compute_artist_weights(bill, _TODAY)['a1']
+        with_fam = compute_artist_weights(bill, _TODAY, {'a1': 1.0})['a1']
+        assert abs(with_fam - base * novelty_multiplier(1.0)) < 1e-9
+
+    def test_novel_artist_beats_familiar_one_at_equal_proximity(self):
+        # The festival case: one event, one date, familiarity is the only
+        # signal that can separate the bill.
+        bill = {'known': [_concert(21)], 'unknown': [_concert(21)]}
+        weights = compute_artist_weights(bill, _TODAY, {'known': 1.0, 'unknown': 0.0})
+        assert weights['unknown'] > weights['known']
+
+    def test_artist_missing_from_the_dict_is_treated_as_unfamiliar(self):
+        bill = {'a1': [_concert(10)], 'a2': [_concert(10)]}
+        weights = compute_artist_weights(bill, _TODAY, {'a1': 1.0})
         assert abs(weights['a2'] - concert_weight(10) * HEADLINER_BONUS) < 1e-9
 
-    def test_past_manual_concert_excluded(self):
-        weights = compute_artist_weights({'a1': [_manual_concert(-5)]}, _TODAY)
-        assert 'a1' not in weights
+    def test_penalty_applies_once_across_multiple_concerts(self):
+        # The multiplier is a per-artist constant, so scaling the summed weight
+        # must equal scaling each concert individually.
+        bill = {'a1': [_concert(10), _concert(20, is_opener=True)]}
+        expected = (concert_weight(10) * HEADLINER_BONUS + concert_weight(20)) \
+            * novelty_multiplier(0.6)
+        assert abs(compute_artist_weights(bill, _TODAY, {'a1': 0.6})['a1'] - expected) < 1e-9
 
-    def test_todays_manual_concert_is_included(self):
-        # A manual concert happening today is fully proximate, not "already
-        # over" — it must be included, unlike a genuinely past manual concert.
-        weights = compute_artist_weights({'a1': [_manual_concert(0)]}, _TODAY)
-        assert 'a1' in weights
-        assert abs(weights['a1'] - concert_weight(0) * HEADLINER_BONUS) < 1e-9
+    def test_proximity_still_dominates_familiarity(self):
+        # The contract that keeps this a marginal signal: a show you are ready
+        # for tonight still outranks an unknown act a month out. If someone
+        # raises FAMILIARITY_PENALTY far enough to break this, it stops being
+        # a tiebreaker and starts overriding the calendar.
+        weights = compute_artist_weights(
+            {'known_tonight': [_concert(0)], 'unknown_later': [_concert(30)]},
+            _TODAY,
+            {'known_tonight': 1.0, 'unknown_later': 0.0},
+        )
+        assert weights['known_tonight'] > weights['unknown_later']
+
+    def test_billing_stays_decisive_at_maximum_familiarity(self):
+        # A headliner the user knows cold must still outweigh a total unknown
+        # opening the same night. FAMILIARITY_PENALTY is deliberately set so the
+        # swing stays under HEADLINER_BONUS: at 0.35 the crossover fell at
+        # familiarity 0.952 and a real bill crossed it (Geese, at 0.996,
+        # dropped below its own opener). 0.33 puts the crossover at 1.010,
+        # outside the clamped input range, so it cannot be reached at all.
+        weights = compute_artist_weights(
+            {'headliner': [_concert(14)], 'opener': [_concert(14, is_opener=True)]},
+            _TODAY,
+            {'headliner': 1.0, 'opener': 0.0},
+        )
+        assert weights['headliner'] > weights['opener']
+
+    def test_familiarity_swing_cannot_reach_the_headliner_bonus(self):
+        # The same contract stated on the constants, so a change to either one
+        # fails here rather than silently inverting a bill.
+        assert HEADLINER_BONUS * novelty_multiplier(1.0) > 1.0
+
+    def test_past_concert_stays_excluded_regardless_of_familiarity(self):
+        weights = compute_artist_weights({'a1': [_concert(-5)]}, _TODAY, {'a1': 0.0})
+        assert 'a1' not in weights
 
 
 # ── allocate_slots ────────────────────────────────────────────────────────────
@@ -333,6 +376,53 @@ class TestAllocateSlotsMinBudget:
         # One artist, tiny target: dropping them would leave nothing at all.
         slots = allocate_slots({'only': 1.0}, target_duration_ms=10_000, min_budget_ms=MIN_ARTIST_BUDGET_MS)
         assert slots == {'only': 10_000}
+
+
+# ── familiarity effects on allocation ─────────────────────────────────────────
+
+class TestFamiliarityInAllocation:
+    def test_novel_artist_gets_the_larger_budget_at_equal_proximity(self):
+        weights = compute_artist_weights(
+            {'known': [_concert(21)], 'unknown': [_concert(21)]},
+            _TODAY,
+            {'known': 1.0, 'unknown': 0.0},
+        )
+        slots = allocate_slots(weights, target_duration_ms=_TARGET_MS)
+        assert slots['unknown'] > slots['known']
+        assert sum(slots.values()) == _TARGET_MS
+
+    def test_familiar_artist_is_evicted_before_the_novel_one(self):
+        # The crowded-calendar case from issue #3. Both marginal artists play
+        # the same night in the same role; only familiarity separates them, and
+        # the budget has room for exactly one of them above the floor.
+        bill = {
+            'near1': [_concert(0)],
+            'near2': [_concert(0)],
+            'near3': [_concert(0)],
+            'zeta_familiar': [_concert(20)],
+            'alpha_novel': [_concert(20)],
+        }
+        weights = compute_artist_weights(bill, _TODAY, {'zeta_familiar': 1.0, 'alpha_novel': 0.0})
+        slots = allocate_slots(
+            weights, target_duration_ms=1_000_000, min_budget_ms=MIN_ARTIST_BUDGET_MS
+        )
+        assert 'alpha_novel' in slots
+        assert 'zeta_familiar' not in slots
+
+    def test_survivors_still_clear_the_floor_and_sum_to_target(self):
+        bill = {
+            'near1': [_concert(0)],
+            'near2': [_concert(0)],
+            'near3': [_concert(0)],
+            'zeta_familiar': [_concert(20)],
+            'alpha_novel': [_concert(20)],
+        }
+        weights = compute_artist_weights(bill, _TODAY, {'zeta_familiar': 1.0, 'alpha_novel': 0.0})
+        slots = allocate_slots(
+            weights, target_duration_ms=1_000_000, min_budget_ms=MIN_ARTIST_BUDGET_MS
+        )
+        assert all(b >= MIN_ARTIST_BUDGET_MS for b in slots.values())
+        assert sum(slots.values()) == 1_000_000
 
 
 # ── _parse_release_date ───────────────────────────────────────────────────────

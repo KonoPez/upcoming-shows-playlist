@@ -32,11 +32,11 @@ from spotify_client.auth import get_spotify_client
 from playlist_logic.weighting import (
     MIN_ARTIST_BUDGET_MS,
     allocate_slots,
+    compute_artist_familiarity_scores,
     compute_artist_weights,
 )
 from playlist_logic.scoring import select_tracks_for_artist
 from playlist_logic.discovery_weighting import (
-    compute_artist_familiarity_scores,
     compute_artist_similarity_scores,
     select_discovery_artists,
     compute_discovery_weights,
@@ -377,8 +377,21 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
 
     _apply_canonical_names(artists, sp, cache)
 
-    # 5. Compute weights and allocate duration budgets
-    weights = compute_artist_weights({a_id: a.concerts for a_id, a in artists.items()}, today)
+    # 5. Artist-level familiarity — a weak downweight (see novelty_multiplier) so
+    # prep time skews toward artists the user does not already know.
+    top_scores  = sp.get_artist_top_scores(cache)
+    play_counts = cache.get_artist_play_counts()
+    artist_familiarity = compute_artist_familiarity_scores(
+        list(artists),
+        {aid: v.score for aid, v in top_scores.items()},
+        play_counts,
+        normalize_against=list(play_counts),
+    )
+
+    # 6. Compute weights and allocate duration budgets
+    weights = compute_artist_weights(
+        {a_id: a.concerts for a_id, a in artists.items()}, today, artist_familiarity
+    )
     slots = allocate_slots(
         weights,
         target_duration_ms=config.playlist_target_duration_minutes * 60_000,
@@ -392,11 +405,11 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     for artist_id in sorted(weights.keys() - slots.keys(), key=lambda aid: artists[aid].name):
         logger.info(f'  {artists[artist_id].name}: dropped, share below the minimum budget')
 
-    # 6. Get user familiarity from Spotify API
+    # 7. Get user familiarity from Spotify API
     logger.info('Fetching Spotify listening history…')
     spotify_familiarity = sp.get_user_familiarity(cache)
 
-    # 7. Select tracks per artist
+    # 8. Select tracks per artist
     setlist_client = SetlistClient(config.setlist_fm_api_key, cache) \
         if config.setlist_fm_api_key else None
     lastfm_client = LastFmClient(config.lastfm_api_key, cache) \
@@ -431,7 +444,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
             f'concert in {min(c.days_until(today) for c in artist.concerts)}d)'
         )
 
-    # 8. Flatten to ordered track list (nearest concert first)
+    # 9. Flatten to ordered track list (nearest concert first)
     def nearest(artist_id: str) -> int:
         return min(c.days_until(today) for c in artists[artist_id].concerts)
 
@@ -444,7 +457,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     total_ms = sum(t.duration_ms for t in all_tracks)
     total_min = total_ms // 60_000
 
-    # 9. Dry run: print summary and exit
+    # 10. Dry run: print summary and exit
     if dry_run:
         artists_with_tracks = sum(1 for a in artists.values() if a.selected_tracks)
         print(f'\n=== DRY RUN — {total} tracks (~{total_min}m) from {artists_with_tracks} artists ===\n')
@@ -454,7 +467,8 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
                 continue
             days = nearest(artist_id)
             chosen_min = sum(t.duration_ms for t in artist.selected_tracks) // 60_000
-            print(f'{artist.name}  ({len(artist.selected_tracks)} tracks, ~{chosen_min}m, concert in {days}d):')
+            fam = artist_familiarity.get(artist_id, 0.0)
+            print(f'{artist.name}  (fam={fam:.2f}, {len(artist.selected_tracks)} tracks, ~{chosen_min}m, concert in {days}d):')
             sl_scores = artist.setlist_scores or {}
             lf_scores = artist.lastfm_scores or {}
             for t in artist.selected_tracks:
@@ -469,7 +483,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
             print()
         return
 
-    # 10. Update Spotify playlist
+    # 11. Update Spotify playlist
     playlist_id = sp.get_or_create_playlist(config.playlist_name, config.playlist_id)
     sp.update_playlist_tracks(playlist_id, track_uris)
 
