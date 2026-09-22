@@ -22,6 +22,7 @@ from playlist_logic.weighting import (
     novelty_multiplier,
 )
 from playlist_logic.scoring import (
+    FAMILIAR_AT_N_PLAYS,
     LASTFM_W,
     RECENCY_WINDOW_DAYS,
     _familiarity,
@@ -476,20 +477,51 @@ class TestFamiliarity:
     def test_api_score_used(self):
         assert _familiarity('t1', {'t1': 0.8}, {}) == 0.8
 
-    def test_play_count_score(self):
-        # 5 plays out of FAMILIAR_AT_N_PLAYS (10) → 0.5
-        assert abs(_familiarity('t1', {}, {'t1': 5}) - 0.2) < 1e-9
+    def test_first_play_is_worth_the_most(self):
+        # Play history is log-scaled: familiarity grows steeply over the first
+        # few listens, then flattens. One play already buys a fifth of the way.
+        assert abs(_familiarity('t1', {}, {'t1': 1}) - 0.2019) < 1e-4
+
+    def test_returns_diminish_with_each_play(self):
+        # The property the curve exists for: the Nth listen always teaches the
+        # listener less than the (N-1)th did.
+        scores = [_familiarity('t1', {}, {'t1': n}) for n in range(0, 12)]
+        gains  = [b - a for a, b in zip(scores, scores[1:])]
+        assert all(a > b for a, b in zip(gains, gains[1:]))
+
+    def test_long_tail_keeps_climbing_past_the_early_plays(self):
+        # Regression guard. An earlier revision divided a *natural* log by 1.5,
+        # which hit the clamp at 3.5 plays and flattened everything above it —
+        # 4 plays and 400 scored identically, erasing the tail this curve is
+        # for. These must stay strictly ordered, and all below 1.0.
+        s4  = _familiarity('t1', {}, {'t1': 4})
+        s10 = _familiarity('t1', {}, {'t1': 10})
+        s20 = _familiarity('t1', {}, {'t1': 20})
+        assert s4 < s10 < s20 < 1.0
+
+    def test_midpoint_is_reached_well_before_the_cap(self):
+        # Log-scaled, so half familiarity arrives around 4–5 plays rather than
+        # at half the cap the way the old linear form did.
+        assert _familiarity('t1', {}, {'t1': 4}) < 0.5 < _familiarity('t1', {}, {'t1': 5})
 
     def test_play_count_at_cap_is_one(self):
-        assert _familiarity('t1', {}, {'t1': 25}) == 1.0
+        # The divisor is derived from the constant, so the cap lands exactly on
+        # it rather than 0.6 plays past it. Retuning the constant moves this.
+        assert _familiarity('t1', {}, {'t1': FAMILIAR_AT_N_PLAYS}) == 1.0
+
+    def test_just_below_the_cap_is_not_yet_one(self):
+        assert _familiarity('t1', {}, {'t1': FAMILIAR_AT_N_PLAYS - 1}) < 1.0
 
     def test_play_count_above_cap_is_clamped(self):
         assert _familiarity('t1', {}, {'t1': 100}) == 1.0
 
-    def test_max_of_api_and_play_history(self):
-        # API says 0.3; play history says 0.7 → use 0.7
-        assert abs(_familiarity('t1', {'t1': 0.2}, {'t1': 7}) - 0.28) < 1e-9
+    def test_api_score_wins_when_higher(self):
+        # 5 plays scores ~0.52; the API's 0.9 is the stronger claim.
+        assert _familiarity('t1', {'t1': 0.9}, {'t1': 5}) == 0.9
 
+    def test_play_history_wins_when_higher(self):
+        # 7 plays scores ~0.61, above the API's 0.2.
+        assert abs(_familiarity('t1', {'t1': 0.2}, {'t1': 7}) - 0.6055) < 1e-4
 
 
 # ── score_track ───────────────────────────────────────────────────────────────

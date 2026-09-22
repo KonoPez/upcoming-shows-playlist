@@ -23,6 +23,7 @@ APIs are configured, and no separate fallback weight sets are needed.
 """
 
 import logging
+import math
 from datetime import date
 from typing import Optional
 
@@ -37,7 +38,7 @@ RECENCY_W = 0.10
 NOVELTY_W = 0.25
 
 RECENCY_WINDOW_DAYS = 548   # 18 months
-FAMILIAR_AT_N_PLAYS = 25    # play count that maxes out familiarity
+FAMILIAR_AT_N_PLAYS = 30    # play count that maxes out familiarity
 
 
 def _parse_release_date(release_date: str) -> date:
@@ -66,9 +67,24 @@ def _familiarity(
     spotify_familiarity: dict[str, float],
     play_counts: dict[str, int],
 ) -> float:
-    """Combined familiarity from Spotify API signal and local play history."""
+    """
+    Combined familiarity from Spotify API signal and local play history.
+
+    Play history is log-scaled rather than linear, because that is how
+    familiarity actually accrues: the first few listens teach a lot and each
+    one after that teaches less, trailing off into a long slow tail. Linear
+    scaling valued the 25th play as highly as the 1st.
+
+    The divisor is derived from FAMILIAR_AT_N_PLAYS so the cap stays tunable
+    from the constant — hard-coding it (as `/ 1.5`) left the constant dead and
+    the real saturation point 0.6 plays adrift of what it claimed. A ratio of
+    two logs is base-independent, so this also cannot drift if the base ever
+    changes: an earlier revision divided a *natural* log by that same 1.5 and
+    saturated at 3.5 plays, flattening the entire tail.
+    """
     api_score = spotify_familiarity.get(track_id, 0.0)
-    history_score = min(play_counts.get(track_id, 0) / FAMILIAR_AT_N_PLAYS, 1.0)
+    plays = play_counts.get(track_id, 0)
+    history_score = min(math.log10(plays + 1) / math.log10(FAMILIAR_AT_N_PLAYS + 1), 1.0)
     return max(api_score, history_score)
 
 
