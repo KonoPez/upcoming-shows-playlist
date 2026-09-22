@@ -321,6 +321,38 @@ class TestDeduplicateTracks:
         result = deduplicate_tracks([a, b])
         assert [t.id for t in result] == ['b']
 
+    # ── Edition pressings collapse ────────────────────────────────────────────
+
+    def test_ep_version_collapses_onto_plain_title(self):
+        # Endswell shipped "Heart Container" as a 2023 single and again on the
+        # 2024 EP *Keepsake* as "Heart Container - EP Version". "EP Version" is
+        # not a variant keyword, so the two used to land in separate groups and
+        # both reached the playlist. Neither is a variant, both are singles
+        # (Spotify types EPs as 'single'), so Last.fm decides — and it scores
+        # the plain title higher, which is also the title setlist.fm indexes.
+        plain = make_track(
+            id='plain', name='Heart Container',
+            album_name='Heart Container', album_type='single',
+            release_date='2023-02-17',
+        )
+        ep = make_track(
+            id='ep', name='Heart Container - EP Version',
+            album_name='Keepsake', album_type='single',
+            release_date='2024-06-07',
+        )
+        lastfm_scores = {'heart container': 1.0, 'heart container - ep version': 0.84}
+        result = deduplicate_tracks([plain, ep], lastfm_scores=lastfm_scores)
+        assert [t.id for t in result] == ['plain']
+
+    def test_edition_pressing_is_not_treated_as_a_variant(self, client):
+        # The normaliser strips more than the variant filter rejects, and that
+        # asymmetry is deliberate: an EP pressing is the same take, so it must
+        # group with the original, but it is not a reject in its own right — if
+        # it were the only copy of the song, it still belongs in the playlist.
+        assert not client._is_variant_recording('Heart Container - EP Version', 'Keepsake')
+        only_copy = make_track(id='ep', name='Heart Container - EP Version')
+        assert deduplicate_tracks([only_copy]) == [only_copy]
+
     def test_studio_single_still_beats_live_album_cut(self):
         # Release type is only consulted among candidates that survive the
         # variant filter, so an album's live cut can't outrank a studio single.
