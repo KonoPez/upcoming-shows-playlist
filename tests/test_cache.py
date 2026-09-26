@@ -59,6 +59,13 @@ class TestKVCache:
         assert cache.get('stale') is None
         assert cache.get('fresh') == 'new'
 
+    def test_get_prefix_returns_only_live_matching_entries(self, cache):
+        cache.set('artist_resolve:geese', 'id1', 3600)
+        cache.set('artist_resolve:stale', 'id2', ttl_seconds=0)
+        cache.set('artistXresolve:abc', 'id3', 3600)
+        time.sleep(0.01)
+        assert cache.get_prefix('artist_resolve:') == {'artist_resolve:geese': 'id1'}
+
 
 # ── Play-history accumulation ─────────────────────────────────────────────────
 

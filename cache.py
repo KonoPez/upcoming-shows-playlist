@@ -115,6 +115,21 @@ class Cache:
                 (key, json.dumps(value), time.time() + ttl_seconds),
             )
 
+    def get_prefix(self, prefix: str) -> dict[str, Any]:
+        """Return {key: value} for every unexpired entry whose key starts with `prefix`."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                'SELECT key, value FROM kv_cache WHERE substr(key, 1, ?) = ? AND expires_at > ?',
+                (len(prefix), prefix, time.time()),
+            ).fetchall()
+        result = {}
+        for row in rows:
+            try:
+                result[row['key']] = json.loads(row['value'])
+            except json.JSONDecodeError:
+                continue
+        return result
+
     def delete(self, key: str) -> None:
         with self._conn() as conn:
             conn.execute('DELETE FROM kv_cache WHERE key = ?', (key,))

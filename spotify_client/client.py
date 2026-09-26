@@ -140,6 +140,27 @@ def deduplicate_tracks(
     return result
 
 
+def _artist_name_key(artist_id: str) -> str:
+    return f'artist_name:{artist_id}'
+
+
+def _artist_tracks_key(artist_id: str) -> str:
+    # v2: entries cached before album_type existed picked the single's copy
+    # of a song over the album's, so they must be refetched rather than aged out.
+    return f'artist_tracks:v2:{artist_id}'
+
+
+def cached_artist_name(artist_id: str, cache: Cache) -> Optional[str]:
+    """The canonical name `get_artist_names` cached, without calling Spotify."""
+    return cache.get(_artist_name_key(artist_id))
+
+
+def cached_artist_tracks(artist_id: str, cache: Cache) -> Optional[list[Track]]:
+    """The discography `get_artist_tracks` cached, without calling Spotify."""
+    cached = cache.get(_artist_tracks_key(artist_id))
+    return None if cached is None else [Track.from_dict(t) for t in cached]
+
+
 class ArtistTopScore(NamedTuple):
     name: str
     score: float
@@ -407,8 +428,7 @@ class SpotifyClient:
         names: dict[str, str] = {}
 
         for artist_id in artist_ids:
-            cache_key = f'artist_name:{artist_id}'
-            cached = cache.get(cache_key)
+            cached = cached_artist_name(artist_id, cache)
             if cached is not None:
                 names[artist_id] = cached
                 continue
@@ -422,7 +442,7 @@ class SpotifyClient:
 
             if name:
                 names[artist_id] = name
-                cache.set(cache_key, name, ARTIST_NAME_TTL)
+                cache.set(_artist_name_key(artist_id), name, ARTIST_NAME_TTL)
 
         return names
 
@@ -430,16 +450,13 @@ class SpotifyClient:
 
     def get_artist_tracks(self, artist_id: str, cache: Cache) -> list[Track]:
         """Return tracks for an artist's discography. Cached for ARTIST_TRACKS_TTL."""
-        # v2: entries cached before album_type existed picked the single's copy
-        # of a song over the album's, so they must be refetched rather than aged out.
-        cache_key = f'artist_tracks:v2:{artist_id}'
-        cached = cache.get(cache_key)
+        cached = cached_artist_tracks(artist_id, cache)
         if cached is not None:
-            return [Track.from_dict(t) for t in cached]
+            return cached
 
         tracks = self._fetch_artist_tracks(artist_id)
         if tracks:
-            cache.set(cache_key, [t.to_dict() for t in tracks], ARTIST_TRACKS_TTL)
+            cache.set(_artist_tracks_key(artist_id), [t.to_dict() for t in tracks], ARTIST_TRACKS_TTL)
         return tracks
 
     def _is_variant_recording(self, track_name: str, album_name: str) -> bool:

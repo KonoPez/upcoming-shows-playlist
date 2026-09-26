@@ -36,6 +36,62 @@ def _parse_setlist_date(date_str: str) -> Optional[date]:
         return None
 
 
+def parse_shows(setlists: list[dict]) -> list[tuple[date, list[str]]]:
+    """
+    Reduce raw setlist.fm setlists to (date, song names) pairs.
+
+    Shows with no songs entered yet are dropped here, before any windowing, so
+    a blank listing can't become the anchor in `setlist_frequencies`.
+    """
+    shows: list[tuple[date, list[str]]] = []
+    for sl in setlists:
+        event_date = _parse_setlist_date(sl.get('eventDate', ''))
+        if not event_date:
+            continue
+
+        songs = [
+            song['name'].lower().strip()
+            for s in sl.get('sets', {}).get('set', [])
+            for song in s.get('song', [])
+            if song.get('name') and song['name'].strip()
+        ]
+        if songs:
+            shows.append((event_date, songs))
+    return shows
+
+
+def setlist_frequencies(shows: list[tuple[date, list[str]]]) -> dict[str, float]:
+    """
+    Return {song name: appearances per sampled show}.
+
+    Samples up to MAX_SHOWS shows within MAX_SPREAD_DAYS of the newest one —
+    the window is anchored on the artist's own latest show, not on today.
+    Pure, so `train_weights.py` can replay it against any slice of an artist's
+    history and see exactly the feature production would have seen then.
+    """
+    if not shows:
+        return {}
+
+    # An artist who last toured two years ago still tells us more than no
+    # data at all, so there is no absolute age floor. But once they play
+    # again, that one fresh show supersedes the whole older run: the anchor
+    # moves forward and the stale shows drop out of the window.
+    shows = sorted(shows, key=lambda s: s[0], reverse=True)
+    cutoff = shows[0][0] - timedelta(days=MAX_SPREAD_DAYS)
+
+    counts: dict[str, int] = {}
+    shows_analyzed = 0
+    for event_date, songs in shows:
+        if shows_analyzed >= MAX_SHOWS or event_date < cutoff:
+            break
+
+        shows_analyzed += 1
+        for key in songs:
+            counts[key] = counts.get(key, 0) + 1
+
+    return {title: count / shows_analyzed for title, count in counts.items()}
+
+
 class SetlistClient:
     def __init__(self, api_key: str, cache: Cache):
         self.cache = cache
@@ -81,49 +137,6 @@ class SetlistClient:
             logger.debug(f'Setlist.fm: no setlists found for "{artist_name}"')
             return {}
 
-        # Collect every usable show first — the age window is measured from the
-        # artist's own latest show, not from today, so it can't be applied until
-        # that show is known.
-        shows: list[tuple[date, list[str]]] = []
-        for sl in setlists:
-            event_date = _parse_setlist_date(sl.get('eventDate', ''))
-            if not event_date:
-                continue
-
-            songs = [
-                song['name'].lower().strip()
-                for s in sl.get('sets', {}).get('set', [])
-                for song in s.get('song', [])
-                if song.get('name') and song['name'].strip()
-            ]
-            if not songs:
-                continue   # skip shows with no setlist data entered yet
-
-            shows.append((event_date, songs))
-
-        if not shows:
-            return {}
-
-        # An artist who last toured two years ago still tells us more than no
-        # data at all, so there is no absolute age floor. But once they play
-        # again, that one fresh show supersedes the whole older run: the anchor
-        # moves forward and the stale shows drop out of the window.
-        shows.sort(key=lambda s: s[0], reverse=True)
-        cutoff = shows[0][0] - timedelta(days=MAX_SPREAD_DAYS)
-
-        counts: dict[str, int] = {}
-        shows_analyzed = 0
-        for event_date, songs in shows:
-            if shows_analyzed >= MAX_SHOWS or event_date < cutoff:
-                break
-
-            shows_analyzed += 1
-            for key in songs:
-                counts[key] = counts.get(key, 0) + 1
-
-        scores = {title: count / shows_analyzed for title, count in counts.items()}
-        logger.debug(
-            f'Setlist.fm: "{artist_name}": {shows_analyzed} shows, '
-            f'{len(scores)} unique tracks found'
-        )
+        scores = setlist_frequencies(parse_shows(setlists))
+        logger.debug(f'Setlist.fm: "{artist_name}": {len(scores)} unique tracks found')
         return scores

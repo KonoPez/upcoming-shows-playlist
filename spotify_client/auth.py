@@ -35,6 +35,7 @@ def get_spotify_client(
     redirect_uri: str,
     token_path: str,
     open_browser: bool = False,
+    status_retries: int = 3,
 ) -> spotipy.Spotify:
     cache_handler = CacheFileHandler(
         cache_path=str(Path(token_path).expanduser())
@@ -46,7 +47,9 @@ def get_spotify_client(
         cache_handler=cache_handler,
         open_browser=open_browser,
     )
-    sp = spotipy.Spotify(auth_manager=auth_manager, requests_timeout=30)
+    # status_retries=0 makes a 429 raise instead of sleeping out Retry-After,
+    # which after a burst of calls can be most of a day.
+    sp = spotipy.Spotify(auth_manager=auth_manager, requests_timeout=30, status_retries=status_retries)
 
     try:
         user = sp.current_user()
