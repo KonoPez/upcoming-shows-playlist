@@ -9,16 +9,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sources.models import Track
-from sources.setlist import SetlistClient, _parse_setlist_date, MAX_SHOWS, MAX_SPREAD_DAYS
+from sources.setlist import (
+    SetlistClient, _parse_setlist_date, find_artist_mbid, MAX_SHOWS, MAX_SPREAD_DAYS,
+)
 from playlist_logic.scoring import SETLIST_W, RECENCY_W, NOVELTY_W, score_track, select_tracks_for_artist
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_setlist(songs: list[str], days_ago: int = 10) -> dict:
+def _make_setlist(
+    songs: list[str], days_ago: int = 10, artist: str = 'Artist', mbid: str = 'mbid-artist',
+) -> dict:
     """Build a minimal setlist.fm setlist payload."""
     d = date.today() - timedelta(days=days_ago)
     return {
+        'artist': {'name': artist, 'mbid': mbid},
         'eventDate': d.strftime('%d-%m-%Y'),
         'sets': {'set': [{'song': [{'name': s} for s in songs]}]},
     }
@@ -205,6 +210,37 @@ class TestSetlistClient:
             result = self._client().get_setlist_scores('Artist')
         assert result == {}
 
+    # ── Pinned to one artist: name search also returns namesakes ──────────────
+
+    def test_namesakes_setlists_are_excluded(self):
+        # The name search matches loosely; another act's shows in the same
+        # response must not leak into this artist's frequencies.
+        result = self._scores([
+            _make_setlist(['Ours'], days_ago=5),
+            _make_setlist(['Theirs'], days_ago=6, artist='Artist', mbid='mbid-namesake'),
+            _make_setlist(['Theirs'], days_ago=7, artist='Artist Band', mbid='mbid-other'),
+            _make_setlist(['Ours'], days_ago=8),
+        ])
+        assert result == {'ours': 1.0}
+
+    def test_fuzzy_match_cannot_move_the_anchor(self):
+        # A different artist's newer show would otherwise become the window's
+        # anchor and push this artist's real shows out of it.
+        result = self._scores([
+            _make_setlist(['Theirs'], days_ago=1, artist='Artists', mbid='mbid-other'),
+            _make_setlist(['Ours'], days_ago=10 + MAX_SPREAD_DAYS),
+        ])
+        assert result == {'ours': 1.0}
+
+    def test_name_match_ignores_case(self):
+        result = self._scores([_make_setlist(['Song'], artist='ARTIST')])
+        assert result == {'song': 1.0}
+
+    def test_no_exact_name_match_returns_empty(self):
+        # Every result belongs to someone else: no data beats a stranger's data.
+        result = self._scores([_make_setlist(['Theirs'], artist='Artist Band', mbid='mbid-other')])
+        assert result == {}
+
     def test_result_is_cached_after_fetch(self):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'setlist': [_make_setlist(['Song'], days_ago=5)]}
@@ -215,6 +251,26 @@ class TestSetlistClient:
             self._client(cache).get_setlist_scores('Artist')
 
         cache.set.assert_called_once()
+
+
+# ── find_artist_mbid ──────────────────────────────────────────────────────────
+
+class TestFindArtistMbid:
+    def test_most_common_mbid_among_exact_name_matches_wins(self):
+        setlists = [
+            _make_setlist([], mbid='a'),
+            _make_setlist([], mbid='b'),
+            _make_setlist([], mbid='b'),
+            _make_setlist([], artist='Artist Band', mbid='c'),
+            _make_setlist([], artist='Artist Band', mbid='c'),
+        ]
+        assert find_artist_mbid(setlists, 'Artist') == 'b'
+
+    def test_none_when_no_name_matches(self):
+        assert find_artist_mbid([_make_setlist([], artist='Other')], 'Artist') is None
+
+    def test_none_for_empty_response(self):
+        assert find_artist_mbid([], 'Artist') is None
 
 
 # ── Setlist frequency as popularity in score_track ────────────────────────────

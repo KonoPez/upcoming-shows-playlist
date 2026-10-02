@@ -64,7 +64,7 @@ from sources.lastfm import LastFmClient
 from sources.models import Track
 from sources.setlist import (
     BASE_URL, MAX_SHOWS, SETLIST_TTL,
-    _parse_setlist_date, parse_shows, setlist_frequencies,
+    _parse_setlist_date, find_artist_mbid, parse_shows, setlist_frequencies,
 )
 from spotify_client.auth import get_spotify_client
 from spotify_client.client import (
@@ -139,18 +139,13 @@ class HistoryFetcher:
 
     def _find_mbid(self, artist_name: str) -> Optional[str]:
         """
-        The MusicBrainz ID behind an artist name, found the way production
-        finds setlists — by name search — then pinned to one artist, so paging
-        can't wander into a namesake's history.
+        The MusicBrainz ID behind an artist name, found exactly as production
+        finds it — the same name search, pinned by the same
+        `find_artist_mbid` — so paging can't wander into a namesake's history
+        and the history matches the artist production would score.
         """
         data = self._get('/search/setlists', {'artistName': artist_name, 'p': 1})
-        wanted = artist_name.casefold()
-        mbids = Counter(
-            sl['artist']['mbid']
-            for sl in data.get('setlist', [])
-            if sl.get('artist', {}).get('name', '').casefold() == wanted
-        )
-        return mbids.most_common(1)[0][0] if mbids else None
+        return find_artist_mbid(data.get('setlist', []), artist_name)
 
     def _get(self, path: str, params: dict) -> dict:
         for attempt in range(RATE_LIMIT_RETRIES):

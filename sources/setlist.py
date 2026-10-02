@@ -12,6 +12,7 @@ heard can still surface if they're live staples.
 
 import logging
 import time
+from collections import Counter
 from datetime import date, timedelta
 from typing import Optional
 
@@ -92,6 +93,26 @@ def setlist_frequencies(shows: list[tuple[date, list[str]]]) -> dict[str, float]
     return {title: count / shows_analyzed for title, count in counts.items()}
 
 
+def find_artist_mbid(setlists: list[dict], artist_name: str) -> Optional[str]:
+    """
+    The MusicBrainz ID of the artist a name search was looking for, or None.
+
+    `/search/setlists?artistName=` matches loosely, so one response can mix the
+    wanted artist's shows with a namesake's or a fuzzy match's. Only setlists
+    whose artist name equals the query (ignoring case) vote, and the most
+    common MBID among them wins — the artist identity, not the name, is what
+    every downstream use pins to.
+    """
+    wanted = artist_name.strip().casefold()
+    mbids = Counter(
+        sl['artist']['mbid']
+        for sl in setlists
+        if sl.get('artist', {}).get('name', '').strip().casefold() == wanted
+        and sl['artist'].get('mbid')
+    )
+    return mbids.most_common(1)[0][0] if mbids else None
+
+
 class SetlistClient:
     def __init__(self, api_key: str, cache: Cache):
         self.cache = cache
@@ -136,6 +157,16 @@ class SetlistClient:
         if not setlists:
             logger.debug(f'Setlist.fm: no setlists found for "{artist_name}"')
             return {}
+
+        # Keep one artist's shows only. With no exact-name match at all, the
+        # results all belong to someone else, so return nothing: an empty dict
+        # drops the setlist weight out of `score_track`, whereas a stranger's
+        # setlists would actively penalise every song they never play.
+        mbid = find_artist_mbid(setlists, artist_name)
+        if mbid is None:
+            logger.debug(f'Setlist.fm: no setlists by exactly "{artist_name}" in search results')
+            return {}
+        setlists = [sl for sl in setlists if sl.get('artist', {}).get('mbid') == mbid]
 
         scores = setlist_frequencies(parse_shows(setlists))
         logger.debug(f'Setlist.fm: "{artist_name}": {len(scores)} unique tracks found')
