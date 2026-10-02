@@ -59,6 +59,23 @@ class TestKVCache:
         assert cache.get('stale') is None
         assert cache.get('fresh') == 'new'
 
+    def test_clear_prefixes_removes_only_matching_keys(self, cache):
+        cache.set('setlist:geese', {}, 3600)
+        cache.set('setlist:endswell', {}, 3600)
+        cache.set('lastfm:geese', {}, 3600)
+        cache.set('lastfm_listeners:geese', 5, 3600)
+        assert cache.clear_prefixes(['setlist:', 'lastfm:']) == 3
+        assert cache.get('setlist:geese') is None
+        assert cache.get('lastfm:geese') is None
+        assert cache.get('lastfm_listeners:geese') == 5
+
+    def test_clear_prefixes_treats_underscore_literally(self, cache):
+        # Under LIKE, `_` matches any character, so `artist_name:` would
+        # also have caught this key.
+        cache.set('artistXname:abc', 'x', 3600)
+        assert cache.clear_prefixes(['artist_name:']) == 0
+        assert cache.get('artistXname:abc') == 'x'
+
     def test_get_prefix_returns_only_live_matching_entries(self, cache):
         cache.set('artist_resolve:geese', 'id1', 3600)
         cache.set('artist_resolve:stale', 'id2', ttl_seconds=0)

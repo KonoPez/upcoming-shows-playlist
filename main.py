@@ -187,6 +187,32 @@ def cmd_setup() -> None:
 
 # ── Cache status ─────────────────────────────────────────────────────────────
 
+# Categories accepted by `--clear-cache CATEGORY`, mapped to the kv_cache key
+# prefixes they cover. Prefixes stop short of version tags (`artist_tracks:`,
+# `artist_top_scores`) so superseded versions are swept along with the live one.
+CACHE_CATEGORIES: dict[str, tuple[str, ...]] = {
+    'setlist':      ('setlist:', 'setlist_history:'),
+    'lastfm':       ('lastfm:', 'lastfm_listeners:', 'lastfm_similar:'),
+    'ticketmaster': ('tm_openers:', 'tm_local_events:'),
+    'resolution':   ('artist_resolve:',),
+    'names':        ('artist_name:',),
+    'discography':  ('artist_tracks:',),
+    'listening':    ('recently_played_raw', 'user_familiarity', 'artist_top_scores'),
+    'geo-consent':  ('ip_geo_consent',),
+}
+
+
+def cmd_clear_cache(categories: list[str]) -> None:
+    cache = Cache()
+    if not categories:
+        counts = cache.clear_all()
+        print(f"Cache cleared ({counts['kv_cache']} entries removed). Play history preserved.")
+        return
+    for category in dict.fromkeys(categories):
+        n = cache.clear_prefixes(list(CACHE_CATEGORIES[category]))
+        print(f'Cleared {category} cache ({n} entries removed).')
+
+
 def cmd_cache_status() -> None:
     s = Cache().get_summary()
 
@@ -1100,7 +1126,9 @@ def main() -> None:
     group.add_argument('--update',      action='store_true', help='Update the playlist (cron)')
     group.add_argument('--status',      action='store_true', help='Show upcoming concerts')
     group.add_argument('--dry-run',     action='store_true', help='Preview without modifying')
-    group.add_argument('--clear-cache',        action='store_true', help='Clear all cached data (discographies, artist lookups)')
+    group.add_argument('--clear-cache', nargs='*', choices=list(CACHE_CATEGORIES), metavar='CATEGORY',
+                       help='Clear cached data — all of it, or only the named categories: '
+                            + ', '.join(CACHE_CATEGORIES))
     group.add_argument('--cache-status',       action='store_true', help='Show cache stats and last run info')
     group.add_argument('--discover',           action='store_true', help='Build discovery playlist from local concerts')
     group.add_argument('--discover-dry-run',   action='store_true', help='Preview discovery playlist without writing to Spotify')
@@ -1121,9 +1149,8 @@ def main() -> None:
         cmd_setup()
     elif args.cache_status:
         cmd_cache_status()
-    elif args.clear_cache:
-        counts = Cache().clear_all()
-        print(f"Cache cleared ({counts['kv_cache']} entries removed). Play history preserved.")
+    elif args.clear_cache is not None:
+        cmd_clear_cache(args.clear_cache)
     elif args.update:
         try:
             cmd_build(dry_run=False, trigger='cron' if args.cron else 'manual')

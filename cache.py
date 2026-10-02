@@ -141,6 +141,22 @@ class Cache:
             n = conn.execute('SELECT changes()').fetchone()[0]
         return {'kv_cache': n}
 
+    def clear_prefixes(self, prefixes: list[str]) -> int:
+        """Delete kv_cache entries whose key starts with any of `prefixes`.
+
+        Compares with substr rather than LIKE, whose `_` wildcard would let
+        a prefix like `artist_name:` match keys it doesn't literally start with.
+        """
+        with self._conn() as conn:
+            n = 0
+            for prefix in prefixes:
+                conn.execute(
+                    'DELETE FROM kv_cache WHERE substr(key, 1, ?) = ?',
+                    (len(prefix), prefix),
+                )
+                n += conn.execute('SELECT changes()').fetchone()[0]
+        return n
+
     def clear_expired(self) -> int:
         with self._conn() as conn:
             conn.execute('DELETE FROM kv_cache WHERE expires_at <= ?', (time.time(),))

@@ -27,6 +27,8 @@ python main.py --remove-concert     # interactively remove a manual concert
 python main.py --list-concerts      # list manually added concerts
 python main.py --cache-status       # show cache stats and last run info
 python main.py --clear-cache        # clear all cached data (preserves play history and run log)
+python main.py --clear-cache setlist lastfm  # clear only the named categories (setlist, lastfm, ticketmaster,
+                                    #   resolution, names, discography, listening, geo-consent)
 python main.py --update --cron      # mark this run as cron-triggered in the run log
 python train_weights.py fetch       # gather setlist.fm history for weight fitting (--max-requests N)
 python train_weights.py fit         # fit + cross-validate track-scoring weights, print suggested constants
@@ -38,7 +40,7 @@ python train_weights.py fit         # fit + cross-validate track-scoring weights
 python -m pytest tests/ -v
 ```
 
-563 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
+565 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
 
 ## Project layout
 
@@ -173,7 +175,7 @@ allocation_weight = enjoyment^1.5 * proximity^1.0
 **Artist familiarity** (`SpotifyClient.get_artist_top_scores`): mirrors `get_user_familiarity` but at artist level. **Rank-aware**: Spotify returns each list in listening order, and each tier's score starts at its ceiling for #1 and decays by `TOP_ARTIST_RANK_SPAN` (0.30) across the rest — short-term 1.0…0.7, medium-term 0.8…0.5, long-term 0.6…0.3. A flat per-tier score threw the rank away, so the artist played twice this month and the one played two hundred times both scored 1.0; rank is free, arriving in the same response. Because the decayed bands overlap (#50 short-term = 0.70 sits below #1 medium-term = 0.80), the cross-tier combination is a genuine `max` and no longer first-tier-wins. Cache key is `artist_top_scores_v3` — v2 held flat scores. Cached 6 hours. Blended with play-history scores in `compute_artist_familiarity_scores`. Used by both pipelines — as an upweight in discovery scoring, and as a downweight in prep slot allocation.
 
 **Cache** (`~/.concert-playlist/cache.db`): SQLite with four tables:
-- `kv_cache` — TTL-based, stores artist resolutions, discographies, API responses
+- `kv_cache` — TTL-based, stores artist resolutions, discographies, API responses. `--clear-cache CATEGORY…` clears selected groups of key prefixes, defined by `CACHE_CATEGORIES` in `main.py` — add any new cache key's prefix there, or it can only be cleared wholesale.
 - `play_history` — append-only, accumulates plays across runs to improve novelty/familiarity scores over time
 - `run_log` — records each successful `--update` or `--discover` run with timestamp and trigger (`'manual'` or `'cron'`); readable via `--cache-status`; the `--cron` flag sets the trigger. IP geolocation consent is stored in `kv_cache` and cleared by `--clear-cache`.
 - `discovery_blocklist` — permanent artist exclusion list; populated via `--block-artist`; not cleared by `--clear-cache`. Artists are keyed by Spotify ID and matched against the current discovery playlist by name.
