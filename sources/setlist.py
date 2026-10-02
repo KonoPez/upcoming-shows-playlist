@@ -37,31 +37,31 @@ def _parse_setlist_date(date_str: str) -> Optional[date]:
         return None
 
 
-def parse_shows(setlists: list[dict]) -> list[tuple[date, list[str]]]:
+def parse_shows(setlists: list[dict]) -> list[tuple[date, set[str]]]:
     """
     Reduce raw setlist.fm setlists to (date, song names) pairs.
 
     Shows with no songs entered yet are dropped here, before any windowing, so
     a blank listing can't become the anchor in `setlist_frequencies`.
     """
-    shows: list[tuple[date, list[str]]] = []
+    shows: list[tuple[date, set[str]]] = []
     for sl in setlists:
         event_date = _parse_setlist_date(sl.get('eventDate', ''))
         if not event_date:
             continue
 
-        songs = [
+        songs = {
             song['name'].lower().strip()
             for s in sl.get('sets', {}).get('set', [])
             for song in s.get('song', [])
             if song.get('name') and song['name'].strip()
-        ]
+        }
         if songs:
             shows.append((event_date, songs))
     return shows
 
 
-def setlist_frequencies(shows: list[tuple[date, list[str]]]) -> dict[str, float]:
+def setlist_frequencies(shows: list[tuple[date, set[str]]]) -> dict[str, float]:
     """
     Return {song name: appearances per sampled show}.
 

@@ -170,18 +170,14 @@ class TestSetlistClient:
         ])
         assert result == {'real song': 1.0}
 
-    def test_song_played_twice_in_show_counts_twice(self):
-        # A song appearing twice (e.g. encore repeat) counts both appearances —
-        # repeated performance is a meaningful signal, not noise to suppress.
-        setlist = _make_setlist(['Song A', 'Song A'], days_ago=5)
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {'setlist': [setlist]}
-        mock_resp.raise_for_status.return_value = None
-
-        with patch('sources.setlist.requests.get', return_value=mock_resp):
-            result = self._client().get_setlist_scores('Artist')
-
-        assert abs(result['song a'] - 2.0) < 1e-9   # 2 appearances / 1 show
+    def test_song_played_twice_in_show_counts_once(self):
+        # Frequency is the share of shows that played a song, so an encore
+        # repeat can't push it past 1.0 — score_track does not clamp it.
+        result = self._scores([
+            _make_setlist(['Song A', 'Song A'], days_ago=5),
+            _make_setlist(['Song B'], days_ago=6),
+        ])
+        assert abs(result['song a'] - 0.5) < 1e-9   # 1 of 2 shows
 
     def test_empty_setlists_returns_empty_dict(self):
         mock_resp = MagicMock()
