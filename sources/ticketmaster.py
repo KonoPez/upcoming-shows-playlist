@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 BASE_URL = 'https://app.ticketmaster.com/discovery/v2'
 LINEUP_TTL = 7 * 24 * 3600        # 7 days — lineups rarely change once announced
 LOCAL_EVENTS_TTL = 6 * 3600       # 6 hours — new shows get announced frequently
-LOCAL_EVENTS_PAGE_SIZE = 100       # results per page
-LOCAL_EVENTS_MAX_PAGES = 5         # cap at 500 events; enough for any metro area
+LOCAL_EVENTS_PAGE_SIZE = 100
+LOCAL_EVENTS_MAX_PAGES = 5
 CALENDAR_SOURCES = {'apple_calendar', 'google_calendar'}
 
 # Event match scoring. A candidate must reach MIN_MATCH_SCORE to be accepted.
@@ -97,14 +97,15 @@ def _concert_from_dict(d: dict) -> Concert:
 def _concerts_from_event(event: dict) -> list[Concert]:
     """
     Convert a raw Ticketmaster event object into one Concert per attraction.
-    The first attraction is treated as the headliner (is_opener=False.
+    The first attraction is treated as the headliner (is_opener=False).
+    An event with no usable date is dropped: `localDate` missing entirely gives
+    None (a TypeError), a malformed one a ValueError, and neither can be placed
+    on the calendar.
     """
     local_date = event.get('dates', {}).get('start', {}).get('localDate')
-    if not local_date:
-        return []
     try:
         event_date = date.fromisoformat(local_date)
-    except ValueError:
+    except (TypeError, ValueError):
         return []
 
     event_name   = event.get('name', '')
@@ -112,9 +113,6 @@ def _concerts_from_event(event: dict) -> list[Concert]:
     attractions  = embedded.get('attractions', [])
     venues       = embedded.get('venues', [])
     venue_name   = venues[0].get('name', 'Unknown Venue') if venues else 'Unknown Venue'
-
-    if not attractions:
-        return []
 
     concerts: list[Concert] = []
     for i, attr in enumerate(attractions):

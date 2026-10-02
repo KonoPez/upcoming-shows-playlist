@@ -1,6 +1,5 @@
 from dataclasses import dataclass, asdict, field
 from datetime import date
-from typing import Optional
 
 
 @dataclass
@@ -50,6 +49,6 @@ class Artist:
     spotify_id: str
     name: str
     concerts: list[Concert] = field(default_factory=list)
-    setlist_scores: Optional[dict[str, float]] = None
-    lastfm_scores: Optional[dict[str, float]] = None
+    setlist_scores: dict[str, float] = field(default_factory=dict)
+    lastfm_scores: dict[str, float] = field(default_factory=dict)
     selected_tracks: list[Track] = field(default_factory=list)

@@ -451,8 +451,8 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
             continue
 
         play_counts = cache.get_play_counts(artist_id)
-        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else None
-        artist.lastfm_scores  = lastfm_client.get_popularity_scores(artist.name) if lastfm_client else None
+        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else {}
+        artist.lastfm_scores  = lastfm_client.get_popularity_scores(artist.name) if lastfm_client else {}
         tracks = deduplicate_tracks(tracks, artist.lastfm_scores)
         artist.selected_tracks = select_tracks_for_artist(
             tracks=tracks,
@@ -495,8 +495,8 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
             chosen_min = sum(t.duration_ms for t in artist.selected_tracks) // 60_000
             fam = artist_familiarity.get(artist_id, 0.0)
             print(f'{artist.name}  (fam={fam:.2f}, {len(artist.selected_tracks)} tracks, ~{chosen_min}m, concert in {days}d):')
-            sl_scores = artist.setlist_scores or {}
-            lf_scores = artist.lastfm_scores or {}
+            sl_scores = artist.setlist_scores
+            lf_scores = artist.lastfm_scores
             for t in artist.selected_tracks:
                 release = (t.release_date or '?')[:4]
                 dur = t.duration_ms // 1000
@@ -1021,8 +1021,8 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             continue
 
         play_counts_artist = cache.get_play_counts(artist_id)
-        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else None
-        artist.lastfm_scores  = lastfm_track_client.get_popularity_scores(artist.name) if lastfm_track_client else None
+        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else {}
+        artist.lastfm_scores  = lastfm_track_client.get_popularity_scores(artist.name) if lastfm_track_client else {}
         tracks = deduplicate_tracks(tracks, artist.lastfm_scores)
         artist.selected_tracks = select_tracks_for_artist(
             tracks=tracks,
@@ -1063,8 +1063,8 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             chosen_min = sum(t.duration_ms for t in artist.selected_tracks) // 60_000
             venues    = ', '.join({c.venue for c in artist.concerts})
             print(f'{artist.name}  (enjoyment={score:.2f}, {len(artist.selected_tracks)} tracks, ~{chosen_min}m, concert in {nearest}d @ {venues}):')
-            sl_scores = artist.setlist_scores or {}
-            lf_scores = artist.lastfm_scores  or {}
+            sl_scores = artist.setlist_scores
+            lf_scores = artist.lastfm_scores
             for t in artist.selected_tracks:
                 release = (t.release_date or '?')[:4]
                 dur     = t.duration_ms // 1000

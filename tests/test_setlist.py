@@ -329,7 +329,7 @@ class TestSelectTracksSetlistIntegration:
             today=self.TODAY,
             setlist_scores={'setlist hit': 1.0},
         )
-        # Both fit in budget, but setlist hit should appear first after interleaving
+        # Both fit in budget, but the setlist hit scores higher so it comes first
         names = [t.name for t in chosen]
         assert 'Setlist Hit' in names
         assert 'Deep Cut' in names

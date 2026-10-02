@@ -137,9 +137,6 @@ def select_tracks_for_artist(
     Score all tracks for an artist and greedily select them until the
     cumulative duration reaches `duration_budget_ms`.
 
-    Applies a per-album cap (max_per_album) so a single album cannot claim
-    every slot. Tracks without an album_id are uncapped.
-
     Tracks are returned in descending score order.
     """
     if not tracks or duration_budget_ms == 0:
@@ -151,14 +148,13 @@ def select_tracks_for_artist(
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Greedy selection with per-album cap, stopping when duration budget is reached
-    album_counts: dict[str, int] = {}
+    # Greedy selection by score, stopping when the duration budget is reached.
     selected: list[Track] = []
     total_ms = 0
     for _, t in scored:
 
         # Round to nearest rather than always up: take this track only if doing
-        # so lands closer to the budget than stopping here would. 
+        # so lands closer to the budget than stopping here would.
         # The first track is always taken so every artist holding a budget is represented.
         remaining_ms = duration_budget_ms - total_ms
         if selected and remaining_ms * 2 < t.duration_ms:
@@ -166,7 +162,5 @@ def select_tracks_for_artist(
 
         selected.append(t)
         total_ms += t.duration_ms
-        if t.album_id:
-            album_counts[t.album_id] = album_counts.get(t.album_id, 0) + 1
 
     return selected
