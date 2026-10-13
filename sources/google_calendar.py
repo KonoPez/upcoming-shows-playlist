@@ -60,7 +60,7 @@ class GoogleCalendarClient:
                 return []
 
             dt = dtstart.dt
-            event_date = dt.date() if isinstance(dt, datetime) else dt
+            event_date = dt.astimezone().date() if isinstance(dt, datetime) else dt
 
             if not (start_date <= event_date <= end_date):
                 return []

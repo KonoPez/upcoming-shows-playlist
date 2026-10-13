@@ -10,7 +10,7 @@ the artist name is extracted from the event title.
 
 import concurrent.futures
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 import caldav
 from icalendar import Calendar
@@ -55,12 +55,8 @@ class AppleCalendarClient:
         principal = client.principal()
         calendars = principal.calendars()
 
-        start_dt = datetime.combine(start_date, datetime.min.time()).replace(
-            tzinfo=timezone.utc
-        )
-        end_dt = datetime.combine(end_date, datetime.max.time()).replace(
-            tzinfo=timezone.utc
-        )
+        start_dt = datetime.combine(start_date, datetime.min.time()).astimezone()
+        end_dt = datetime.combine(end_date, datetime.max.time()).astimezone()
 
         concerts: list[Concert] = []
         for cal in calendars:
@@ -71,7 +67,10 @@ class AppleCalendarClient:
                 continue
 
             for event in events:
-                concerts.extend(self._parse(event))
+                concerts.extend(
+                    c for c in self._parse(event)
+                    if start_date <= c.event_date <= end_date
+                )
 
         logger.info(f'Apple Calendar: {len(concerts)} concert-like events found (searched {len(calendars)} calendars)')
         return concerts
@@ -95,7 +94,7 @@ class AppleCalendarClient:
 
             dt = dtstart.dt
             if isinstance(dt, datetime):
-                event_date = dt.date()
+                event_date = dt.astimezone().date()
             elif isinstance(dt, date):
                 event_date = dt
             else:

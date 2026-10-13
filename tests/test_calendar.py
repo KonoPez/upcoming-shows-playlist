@@ -3,6 +3,7 @@ Tests for Apple and Google Calendar clients.
 No real network calls or CalDAV connections are made.
 """
 
+import time
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,16 @@ from sources.models import Concert
 
 START = date(2024, 6, 1)
 END   = date(2024, 9, 1)
+
+
+@pytest.fixture
+def chicago_tz(monkeypatch):
+    """Run the test with the process's local timezone set to US Central."""
+    monkeypatch.setenv('TZ', 'America/Chicago')
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 # ── fake object builders ──────────────────────────────────────────────────────
@@ -118,11 +129,23 @@ class TestGoogleCalendarParse:
         concerts = self.client._parse(evt, START, END)
         assert concerts[0].event_date == date(2024, 7, 4)
 
-    def test_datetime_dtstart_converted_to_date(self):
+    def test_datetime_dtstart_converted_to_date(self, chicago_tz):
         dt = datetime(2024, 7, 4, 20, 0, tzinfo=timezone.utc)
         evt = _gcal_component('Radiohead @ MSG', dtstart=dt)
         concerts = self.client._parse(evt, START, END)
         assert concerts[0].event_date == date(2024, 7, 4)
+
+    def test_utc_datetime_takes_local_date(self, chicago_tz):
+        # Google's ICS export writes times in UTC: a 7:30pm Central show on
+        # July 4 is 00:30 UTC on July 5.
+        dt = datetime(2024, 7, 5, 0, 30, tzinfo=timezone.utc)
+        evt = _gcal_component('Radiohead @ MSG', dtstart=dt)
+        assert self.client._parse(evt, START, END)[0].event_date == date(2024, 7, 4)
+
+    def test_last_night_show_excluded_from_today(self, chicago_tz):
+        dt = datetime(2024, 6, 1, 0, 30, tzinfo=timezone.utc)
+        evt = _gcal_component('Radiohead @ MSG', dtstart=dt)
+        assert self.client._parse(evt, START, END) == []
 
     def test_missing_dtstart_returns_empty(self):
         evt = _gcal_component('Radiohead @ MSG', dtstart=None)
@@ -282,8 +305,13 @@ class TestAppleCalendarParse:
         evt = _apple_event('Radiohead @ MSG', dtstart=date(2024, 7, 4))
         assert self.client._parse(evt)[0].event_date == date(2024, 7, 4)
 
-    def test_datetime_dtstart_converted_to_date(self):
+    def test_datetime_dtstart_converted_to_date(self, chicago_tz):
         dt = datetime(2024, 7, 4, 20, 0, tzinfo=timezone.utc)
+        evt = _apple_event('Radiohead @ MSG', dtstart=dt)
+        assert self.client._parse(evt)[0].event_date == date(2024, 7, 4)
+
+    def test_utc_datetime_takes_local_date(self, chicago_tz):
+        dt = datetime(2024, 7, 5, 0, 30, tzinfo=timezone.utc)
         evt = _apple_event('Radiohead @ MSG', dtstart=dt)
         assert self.client._parse(evt)[0].event_date == date(2024, 7, 4)
 
@@ -359,3 +387,16 @@ class TestAppleCalendarGetConcerts:
         with patch.object(client, '_fetch', return_value=concerts):
             result = client.get_concerts(START, END)
         assert result == concerts
+
+    def test_fetch_drops_events_before_start_date(self, chicago_tz):
+        # The CalDAV search can return last night's show (it overlaps the
+        # window), so _fetch filters on the parsed local date.
+        last_night = _apple_event('Radiohead @ MSG', dtstart=datetime(2024, 6, 1, 0, 30, tzinfo=timezone.utc))
+        tonight = _apple_event('Wilco @ MSG', dtstart=datetime(2024, 6, 2, 0, 30, tzinfo=timezone.utc))
+        cal = MagicMock()
+        cal.date_search.return_value = [last_night, tonight]
+        client = AppleCalendarClient('user@icloud.com', 'pass')
+        with patch('sources.apple_calendar.caldav.DAVClient') as dav:
+            dav.return_value.principal.return_value.calendars.return_value = [cal]
+            result = client._fetch(START, END)
+        assert [c.artist_name for c in result] == ['Wilco']
