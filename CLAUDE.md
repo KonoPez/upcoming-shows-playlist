@@ -183,6 +183,8 @@ allocation_weight = enjoyment^1.5 * proximity^1.0
 
 **Cron setup** (`setup_cron.py`): interactive — asks whether to schedule the prep playlist, the discovery playlist, or both. Each gets its own crontab entry with a distinct marker comment so they can be installed/removed independently. Both use `--cron` flag so runs are correctly tagged in the run log.
 
+**Playlist lookup failures** (`SpotifyClient.get_or_create_playlist`): only a 403/404 from Spotify replaces the configured playlist; timeouts, 5xx and 429s re-raise. A scheduled run can land in a dark wake with flaky networking, and reading a timeout as "not found" would write the day's tracks into a fresh playlist whose ID the prep path never saves.
+
 **Deprecated Spotify API fields/endpoints** — do not use these:
 - `track.popularity` — returns 0 for most artists; use Last.fm `artist.getTopTracks` play counts instead
 - `artist.popularity` — deprecated; same replacement

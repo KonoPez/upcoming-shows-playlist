@@ -5,6 +5,8 @@ Tests for spotify_client/client.py — pure-logic methods only, no API calls.
 from unittest.mock import MagicMock
 
 import pytest
+import requests
+import spotipy
 
 from spotify_client.client import (
     TOP_ARTIST_RANK_SPAN,
@@ -699,3 +701,31 @@ class TestGetArtistTopScores:
         client.sp.current_user_top_artists = _boom
         scores = client.get_artist_top_scores(cache)
         assert 'm' in scores and abs(scores['m'].score - 0.8) < 1e-9
+
+class TestGetOrCreatePlaylist:
+    def test_existing_playlist_is_reused(self, client):
+        client.sp.playlist.return_value = {'id': 'pl1', 'name': 'Upcoming Shows'}
+        assert client.get_or_create_playlist('Upcoming Shows', 'pl1') == 'pl1'
+        client.sp._post.assert_not_called()
+
+    @pytest.mark.parametrize('status', [403, 404])
+    def test_missing_playlist_is_replaced(self, client, status):
+        client.sp.playlist.side_effect = spotipy.SpotifyException(status, -1, 'gone')
+        client.sp._post.return_value = {'id': 'new'}
+        assert client.get_or_create_playlist('Upcoming Shows', 'pl1') == 'new'
+
+    def test_timeout_does_not_create_a_duplicate(self, client):
+        # A cron run during a flaky dark wake used to read a timeout as "not found"
+        # and write the day's tracks into a fresh, unsaved playlist.
+        client.sp.playlist.side_effect = requests.exceptions.ReadTimeout('timed out')
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            client.get_or_create_playlist('Upcoming Shows', 'pl1')
+        client.sp._post.assert_not_called()
+
+    @pytest.mark.parametrize('status', [429, 500, 502])
+    def test_transient_api_error_does_not_create_a_duplicate(self, client, status):
+        client.sp.playlist.side_effect = spotipy.SpotifyException(status, -1, 'try later')
+        with pytest.raises(spotipy.SpotifyException):
+            client.get_or_create_playlist('Upcoming Shows', 'pl1')
+        client.sp._post.assert_not_called()
+

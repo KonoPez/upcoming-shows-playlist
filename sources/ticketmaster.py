@@ -291,16 +291,19 @@ class TicketmasterClient:
         Returns [] when the API responds but no matching event is found.
         """
         date_str = event_date.strftime('%Y-%m-%d')
+        # The API filters on UTC start times, but event_date is the venue's
+        # local date: an 8pm show in Chicago starts the next day in UTC. Search
+        # a day either side and keep only events whose localDate matches.
         try:
             resp = requests.get(
                 f'{BASE_URL}/events.json',
                 params={
                     'apikey': self.api_key,
                     'keyword': headliner,
-                    'startDateTime': f'{date_str}T00:00:00Z',
-                    'endDateTime': f'{date_str}T23:59:59Z',
+                    'startDateTime': f'{event_date - timedelta(days=1)}T00:00:00Z',
+                    'endDateTime': f'{event_date + timedelta(days=1)}T23:59:59Z',
                     'classificationName': 'music',
-                    'size': 5,
+                    'size': 20,
                 },
                 timeout=10,
             )
@@ -309,7 +312,10 @@ class TicketmasterClient:
             logger.warning(f'Ticketmaster API error for "{headliner}": {e}')
             return None
 
-        events = resp.json().get('_embedded', {}).get('events', [])
+        events = [
+            ev for ev in resp.json().get('_embedded', {}).get('events', [])
+            if ev.get('dates', {}).get('start', {}).get('localDate') == date_str
+        ]
         if not events:
             logger.debug(f'Ticketmaster: no events found for "{headliner}" on {date_str}')
             return []

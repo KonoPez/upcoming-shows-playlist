@@ -191,13 +191,21 @@ class SpotifyClient:
         """
         Return the ID of the managed playlist.
         Uses the existing playlist_id if still valid; otherwise creates a new one.
+
+        Only a definitive answer from Spotify (404 / 403) counts as "invalid".
+        Anything else — a timeout, a 5xx, a rate limit — is re-raised: the
+        playlist is probably fine and Spotify just couldn't say so, and
+        creating a replacement would strand the day's tracks in an orphan
+        playlist the user isn't looking at.
         """
         if playlist_id:
             try:
                 pl = self.sp.playlist(playlist_id, fields='id,name')
                 logger.info(f'Using playlist: "{pl["name"]}" ({pl["id"]})')
                 return pl['id']
-            except Exception:
+            except spotipy.SpotifyException as e:
+                if e.http_status not in (403, 404):
+                    raise
                 logger.warning(
                     f'Playlist {playlist_id} not found or inaccessible — creating a new one.'
                 )

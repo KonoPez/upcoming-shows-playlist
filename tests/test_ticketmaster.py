@@ -267,11 +267,22 @@ class TestExtractOpeners:
 # ── TicketmasterClient.lookup_openers (HTTP mocked) ───────────────────────────
 
 class TestLookupOpeners:
+    def _tm_event(self, artist_names, venue='The Fillmore', local_date='2026-04-26'):
+        return {
+            'name': f'{artist_names[0]} Tour',
+            'dates': {'start': {'localDate': local_date}},
+            '_embedded': {
+                'attractions': [{'name': n} for n in artist_names],
+                'venues': [{'name': venue}],
+            },
+        }
+
     def _tm_response(self, artist_names, venue='The Fillmore'):
         return {
             '_embedded': {
                 'events': [{
                     'name': f'{artist_names[0]} Tour',
+                    'dates': {'start': {'localDate': '2026-04-26'}},
                     '_embedded': {
                         'attractions': [{'name': n} for n in artist_names],
                         'venues': [{'name': venue}],
@@ -344,6 +355,38 @@ class TestLookupOpeners:
         assert openers == []
         # Empty result IS cached (event checked, no openers exist)
         assert cache.get('tm_openers:good kid:2026-04-26') == []
+
+    def test_matches_on_local_date_across_a_multi_night_run(self, tmp_path):
+        # An 8pm Chicago show on Oct 31 starts Nov 1 in UTC, so the search
+        # window spans neighbouring nights and localDate picks the right one.
+        from cache import Cache
+        client = TicketmasterClient(api_key='fake', cache=Cache(db_path=tmp_path / 'test.db'))
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'_embedded': {'events': [
+            self._tm_event(['Geese', 'Gwenifer Raymond'], 'Salt Shed', '2026-11-01'),
+            self._tm_event(['Geese', 'Easy Star All-Stars'], 'Salt Shed', '2026-10-31'),
+        ]}}
+
+        with patch('sources.ticketmaster.requests.get', return_value=mock_resp) as mock_get:
+            openers = client.lookup_openers('Geese', date(2026, 10, 31), 'Salt Shed')
+
+        params = mock_get.call_args.kwargs['params']
+        assert params['startDateTime'] == '2026-10-30T00:00:00Z'
+        assert params['endDateTime'] == '2026-11-01T23:59:59Z'
+        assert [o.artist_name for o in openers] == ['Easy Star All-Stars']
+
+    def test_event_on_another_local_date_is_not_matched(self, tmp_path):
+        from cache import Cache
+        client = TicketmasterClient(api_key='fake', cache=Cache(db_path=tmp_path / 'test.db'))
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'_embedded': {'events': [
+            self._tm_event(['Good Kid', 'INOHA'], local_date='2026-04-27'),
+        ]}}
+
+        with patch('sources.ticketmaster.requests.get', return_value=mock_resp):
+            assert client.lookup_openers('Good Kid', date(2026, 4, 26), 'The Fillmore') == []
 
 
 # ── enrich_with_openers ────────────────────────────────────────────────────────
