@@ -29,7 +29,8 @@ python main.py --cache-status       # show cache stats and last run info
 python main.py --clear-cache        # clear all cached data (preserves play history and run log)
 python main.py --clear-cache setlist lastfm  # clear only the named categories (setlist, lastfm, ticketmaster,
                                     #   resolution, names, discography, listening, geo-consent)
-python main.py --update --cron      # mark this run as cron-triggered in the run log
+python main.py --update --cron      # scheduled run: tagged 'cron' in the run log, transient failures retried
+python main.py --discover --skip-if-ran-within 60  # no-op if discovery last ran <60h ago (used by the scheduler)
 python -m tools.train_weights fetch # gather setlist.fm history for weight fitting (--max-requests N)
 python -m tools.train_weights fit   # fit + cross-validate track-scoring weights, print suggested constants
 ```
@@ -40,7 +41,7 @@ python -m tools.train_weights fit   # fit + cross-validate track-scoring weights
 python -m pytest tests/ -v
 ```
 
-565 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
+618 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
 
 ## Project layout
 
@@ -75,6 +76,7 @@ tests/
   test_lastfm.py                # LastFmClient behaviour + log-normalisation
   test_discovery.py             # Discovery scoring, familiarity, slot guarantee, TM local events
   test_train_weights.py         # Weight fitting: before/after cutoff split, gradient, optimiser
+  test_setup_cron.py            # launchd plist generation: arguments, schedules
 conftest.py                     # Adds project root to sys.path for test imports
 setup_cron.py                   # Interactive cron installer — asks which playlists to schedule
 tools/
@@ -178,10 +180,12 @@ allocation_weight = enjoyment^1.5 * proximity^1.0
 **Cache** (`~/.concert-playlist/cache.db`): SQLite with four tables:
 - `kv_cache` — TTL-based, stores artist resolutions, discographies, API responses. `--clear-cache CATEGORY…` clears selected groups of key prefixes, defined by `CACHE_CATEGORIES` in `main.py` — add any new cache key's prefix there, or it can only be cleared wholesale.
 - `play_history` — append-only, accumulates plays across runs to improve novelty/familiarity scores over time
-- `run_log` — records each successful `--update` or `--discover` run with timestamp and trigger (`'manual'` or `'cron'`); readable via `--cache-status`; the `--cron` flag sets the trigger. IP geolocation consent is stored in `kv_cache` and cleared by `--clear-cache`.
+- `run_log` — records each successful `--update` or `--discover` run with timestamp, trigger (`'manual'` or `'cron'`) and command (`'update'` or `'discover'`); readable via `--cache-status`; the `--cron` flag sets the trigger. `command` was added by migration, and rows from before it stay NULL rather than being guessed, so an old prep run can't satisfy `--skip-if-ran-within` for discovery. IP geolocation consent is stored in `kv_cache` and cleared by `--clear-cache`.
 - `discovery_blocklist` — permanent artist exclusion list; populated via `--block-artist`; not cleared by `--clear-cache`. Artists are keyed by Spotify ID and matched against the current discovery playlist by name.
 
-**Cron setup** (`setup_cron.py`): interactive — asks whether to schedule the prep playlist, the discovery playlist, or both. Each gets its own crontab entry with a distinct marker comment so they can be installed/removed independently. Both use `--cron` flag so runs are correctly tagged in the run log.
+**Scheduling** (`setup_cron.py`): despite the name, installs launchd agents (`~/Library/LaunchAgents/com.concert-playlist.{update,discover}.plist`), not crontab entries — cron silently skips any job whose time passes while the Mac is asleep, and on a lid-closed laptop at 09:00 that was most days. launchd runs a missed `StartCalendarInterval` job at next wake (see `man launchd.plist`). Prep runs daily at 09:00. Discovery runs every `DISCOVER_EVERY_HOURS` (60): launchd can't express that directly, because `StartInterval` *drops* firings that fall during sleep, so discovery ticks every 6 hours on the calendar and passes `--skip-if-ran-within 60`, which makes every tick but the due one a no-op (real cadence 60–66h). The gate in `main._ran_within` allows `SKIP_WINDOW_GRACE` (15 min) of slack, since a run is logged a minute or two after the tick that started it and would otherwise miss the matching tick 60h later. Interactive — asks which playlists to schedule; `--status` / `--remove` manage them. Installing strips legacy `# concert-playlist` crontab lines. Logs go to `~/.concert-playlist/launchd.log`.
+
+**Scheduled-run retries** (`main._run_with_retries`): `--cron` runs that fail transiently are retried after 5, 15 and 30 minutes; manual runs fail fast. A scheduled run often starts the moment the Mac wakes, or in a dark wake where the network drops mid-run. "Transient" (`main._is_transient`) is any `OSError` — `requests`' and `niquests`' (caldav) exceptions both derive from it, as does the QUIC "Idle timeout" from `qh3` that urllib3-future raises and requests rewraps as `ConnectionError` — plus Spotify 429/5xx. Anything else is a bug and is not retried. Retries only help if failures are visible, which is why the discography fetch (`_get_artist_albums`, `_get_album_tracks`) now re-raises anything that isn't `is_definitive_error` (a 4xx other than 429). It used to swallow timeouts and cache the discography minus the failed albums for `ARTIST_TRACKS_TTL` (30 days), so one flaky run could leave an artist with missing songs, or "no tracks found", for a month. spotipy itself already retries connection errors and 429/5xx, but builds its `Retry` with `read=False`, so read timeouts are never retried at the request level.
 
 **Playlist lookup failures** (`SpotifyClient.get_or_create_playlist`): only a 403/404 from Spotify replaces the configured playlist; timeouts, 5xx and 429s re-raise. A scheduled run can land in a dark wake with flaky networking, and reading a timeout as "not found" would write the day's tracks into a fresh playlist whose ID the prep path never saves.
 

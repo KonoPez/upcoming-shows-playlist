@@ -24,6 +24,29 @@ API_DELAY = 0.1                        # 100 ms between calls
 TOP_ARTIST_RANK_SPAN = 0.30            # how far a tier's score decays from #1 to last
 MAX_ALBUMS_PER_ARTIST = 25            # most recent studio albums + singles
 
+def is_definitive_error(e: Exception) -> bool:
+    """
+    True when Spotify answered and the answer was no: a 4xx other than 429.
+    Repeating the request won't change it, so the caller can treat it as data
+    (no such album, no access) and move on.
+
+    Everything else — timeouts, dropped connections, 5xx, rate limits — says
+    nothing about the data, and must not be mistaken for an empty result. The
+    test is written this way round, rather than as a list of transient error
+    types, because the transport layer is not fixed: this environment's
+    urllib3-future can surface a QUIC "Idle timeout" from qh3 that is neither
+    a requests.Timeout nor a ConnectionError.
+    """
+    status = getattr(e, 'http_status', None)
+    return (
+        isinstance(e, spotipy.SpotifyException)
+        and status is not None
+        and 400 <= status < 500
+        and status != 429
+    )
+
+
+
 # Album names that indicate the entire album is a non-studio recording.
 _VARIANT_ALBUM_RE = re.compile(
     r'\b(live\s+(at|from|in)\b'
@@ -580,6 +603,11 @@ class SpotifyClient:
                         limit //= 2
                         logger.debug(f'Albums fetch for {artist_id}: limit capped, retrying with limit={limit}')
                         continue
+                    # A partial album list would be cached as the artist's whole
+                    # discography for ARTIST_TRACKS_TTL, so only a definitive
+                    # answer may end the listing early.
+                    if not is_definitive_error(e):
+                        raise
                     logger.warning(f'Failed to fetch albums for {artist_id}: {e}')
                     break
         finally:
@@ -624,6 +652,10 @@ class SpotifyClient:
                 offset += 50
                 time.sleep(API_DELAY)
             except Exception as e:
+                # Same reasoning as _get_artist_albums: swallowing a timeout here
+                # caches the discography minus this album for a month.
+                if not is_definitive_error(e):
+                    raise
                 logger.warning(f'Failed to fetch tracks for album {album_id}: {e}')
                 break
         return tracks

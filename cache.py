@@ -66,7 +66,8 @@ class Cache:
                 CREATE TABLE IF NOT EXISTS run_log (
                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_at   TEXT NOT NULL,
-                    trigger  TEXT NOT NULL CHECK (trigger IN ('manual', 'cron'))
+                    trigger  TEXT NOT NULL CHECK (trigger IN ('manual', 'cron')),
+                    command  TEXT CHECK (command IN ('update', 'discover'))
                 );
 
                 CREATE TABLE IF NOT EXISTS discovery_blocklist (
@@ -92,6 +93,16 @@ class Cache:
             if 'is_opener' not in cols:
                 conn.execute(
                     'ALTER TABLE manual_concerts ADD COLUMN is_opener INTEGER NOT NULL DEFAULT 0'
+                )
+
+            # Migration: run_log rows written before `command` existed stay NULL —
+            # nothing recorded which playlist they updated, and guessing would let
+            # an old prep run pass for a recent discovery run.
+            cols = [r['name'] for r in conn.execute('PRAGMA table_info(run_log)')]
+            if 'command' not in cols:
+                conn.execute(
+                    "ALTER TABLE run_log ADD COLUMN command TEXT "
+                    "CHECK (command IN ('update', 'discover'))"
                 )
 
     # ── Key-value cache ──────────────────────────────────────────────────────
@@ -204,23 +215,32 @@ class Cache:
 
     # ── Run log ──────────────────────────────────────────────────────────────
 
-    def record_run(self, trigger: str) -> None:
-        """Record a completed playlist update. trigger must be 'manual' or 'cron'."""
+    def record_run(self, trigger: str, command: str) -> None:
+        """
+        Record a completed playlist update.
+        trigger must be 'manual' or 'cron'; command must be 'update' or 'discover'.
+        """
         run_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._conn() as conn:
             conn.execute(
-                'INSERT INTO run_log (run_at, trigger) VALUES (?, ?)',
-                (run_at, trigger),
+                'INSERT INTO run_log (run_at, trigger, command) VALUES (?, ?, ?)',
+                (run_at, trigger, command),
             )
 
-    def get_last_run(self) -> 'Optional[dict]':
-        """Return {'run_at': ..., 'trigger': ...} for the most recent run, or None."""
+    def get_last_run(self, command: Optional[str] = None) -> 'Optional[dict]':
+        """
+        Return {'run_at': ..., 'trigger': ..., 'command': ...} for the most recent
+        run — of `command` only, when given — or None.
+        """
+        query = 'SELECT run_at, trigger, command FROM run_log'
+        params: tuple = ()
+        if command is not None:
+            query += ' WHERE command = ?'
+            params = (command,)
         with self._conn() as conn:
-            row = conn.execute(
-                'SELECT run_at, trigger FROM run_log ORDER BY id DESC LIMIT 1'
-            ).fetchone()
+            row = conn.execute(query + ' ORDER BY id DESC LIMIT 1', params).fetchone()
         if row:
-            return {'run_at': row['run_at'], 'trigger': row['trigger']}
+            return {'run_at': row['run_at'], 'trigger': row['trigger'], 'command': row['command']}
         return None
 
     # ── Discovery blocklist ──────────────────────────────────────────────────

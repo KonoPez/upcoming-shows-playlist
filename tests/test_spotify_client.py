@@ -13,6 +13,7 @@ from spotify_client.client import (
     SpotifyClient,
     album_type_rank,
     deduplicate_tracks,
+    is_definitive_error,
     pad_release_date,
 )
 from sources.models import Track
@@ -702,6 +703,7 @@ class TestGetArtistTopScores:
         scores = client.get_artist_top_scores(cache)
         assert 'm' in scores and abs(scores['m'].score - 0.8) < 1e-9
 
+
 class TestGetOrCreatePlaylist:
     def test_existing_playlist_is_reused(self, client):
         client.sp.playlist.return_value = {'id': 'pl1', 'name': 'Upcoming Shows'}
@@ -729,3 +731,61 @@ class TestGetOrCreatePlaylist:
             client.get_or_create_playlist('Upcoming Shows', 'pl1')
         client.sp._post.assert_not_called()
 
+
+class TestIsDefinitiveError:
+    @pytest.mark.parametrize('status', [400, 403, 404])
+    def test_client_errors_are_definitive(self, status):
+        assert is_definitive_error(spotipy.SpotifyException(status, -1, 'no'))
+
+    @pytest.mark.parametrize('status', [429, 500, 503])
+    def test_rate_limits_and_server_errors_are_not(self, status):
+        assert not is_definitive_error(spotipy.SpotifyException(status, -1, 'later'))
+
+    @pytest.mark.parametrize('exc', [
+        requests.exceptions.ReadTimeout('timed out'),
+        requests.exceptions.ConnectionError('reset'),
+        Exception('Idle timeout'),   # qh3's QUIC error arrives as no requests type at all
+    ])
+    def test_transport_failures_are_not(self, exc):
+        assert not is_definitive_error(exc)
+
+
+class TestDiscographyFetchFailures:
+    def test_album_list_timeout_propagates(self, client):
+        client.sp._get.side_effect = requests.exceptions.ReadTimeout('timed out')
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            client._get_artist_albums('artist1')
+
+    def test_album_list_404_still_ends_quietly(self, client):
+        client.sp._get.side_effect = spotipy.SpotifyException(404, -1, 'no artist')
+        assert client._get_artist_albums('artist1') == []
+
+    def test_album_tracks_timeout_propagates(self, client):
+        client.sp.album_tracks.side_effect = requests.exceptions.ReadTimeout('timed out')
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            client._get_album_tracks('alb1')
+
+    def test_album_tracks_404_still_skips_the_album(self, client):
+        client.sp.album_tracks.side_effect = spotipy.SpotifyException(404, -1, 'no album')
+        assert client._get_album_tracks('alb1') == []
+
+    def test_timeout_mid_discography_caches_nothing(self, client, cache):
+        # The bug this guards: one album timing out used to be swallowed, and the
+        # discography minus that album was cached for ARTIST_TRACKS_TTL.
+        client._get_artist_albums = MagicMock(return_value=[
+            {'id': 'a1', 'name': 'First', 'release_date': '2020', 'album_type': 'album'},
+            {'id': 'a2', 'name': 'Second', 'release_date': '2021', 'album_type': 'album'},
+        ])
+        client.sp.album_tracks.side_effect = [
+            {'items': [{'id': 't1', 'name': 'Song', 'duration_ms': 1000}], 'next': None},
+            requests.exceptions.ReadTimeout('timed out'),
+        ]
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            client.get_artist_tracks('artist1', cache)
+
+        client.sp.album_tracks.side_effect = lambda album_id, **_: {
+            'items': [{'id': f'{album_id}-t', 'name': f'{album_id} song', 'duration_ms': 1000}],
+            'next': None,
+        }
+        ids = {t.id for t in client.get_artist_tracks('artist1', cache)}
+        assert ids == {'a1-t', 'a2-t'}

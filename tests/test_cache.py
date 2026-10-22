@@ -242,3 +242,43 @@ class TestManualConcerts:
         cache.add_manual_concert('Artist A', '2026-08-01')
         cache.clear_all()
         assert len(cache.get_manual_concerts()) == 1
+
+
+class TestRunLog:
+    def test_no_runs(self, cache):
+        assert cache.get_last_run() is None
+        assert cache.get_last_run('discover') is None
+
+    def test_last_run_overall(self, cache):
+        cache.record_run('cron', 'update')
+        cache.record_run('manual', 'discover')
+        last = cache.get_last_run()
+        assert (last['trigger'], last['command']) == ('manual', 'discover')
+
+    def test_last_run_filtered_by_command(self, cache):
+        cache.record_run('manual', 'discover')
+        cache.record_run('cron', 'update')
+        assert cache.get_last_run('discover')['trigger'] == 'manual'
+
+    def test_pre_command_run_log_is_migrated(self, tmp_path):
+        import sqlite3
+        db = tmp_path / 'old.db'
+        conn = sqlite3.connect(db)
+        conn.executescript('''
+            CREATE TABLE run_log (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_at   TEXT NOT NULL,
+                trigger  TEXT NOT NULL CHECK (trigger IN ('manual', 'cron'))
+            );
+            INSERT INTO run_log (run_at, trigger) VALUES ('2026-10-01T00:00:00+00:00', 'cron');
+        ''')
+        conn.commit()
+        conn.close()
+
+        cache = Cache(db_path=db)
+        # The old row says nothing about which playlist it updated, so it must
+        # not count as a run of either.
+        assert cache.get_last_run()['command'] is None
+        assert cache.get_last_run('discover') is None
+        cache.record_run('cron', 'discover')
+        assert cache.get_last_run('discover') is not None

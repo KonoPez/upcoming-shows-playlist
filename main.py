@@ -15,10 +15,13 @@ import argparse
 import datetime
 import logging
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Callable
 
 import requests
+import spotipy
 
 from config import config, APP_DIR
 from cache import Cache
@@ -513,7 +516,7 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
     playlist_id = sp.get_or_create_playlist(config.playlist_name, config.playlist_id)
     sp.update_playlist_tracks(playlist_id, track_uris)
 
-    cache.record_run(trigger)
+    cache.record_run(trigger, 'update')
 
     print(f'\nPlaylist updated: {total} tracks (~{total_min}m) from {sum(1 for a in artists.values() if a.selected_tracks)} artists')
     print(f'Open: https://open.spotify.com/playlist/{playlist_id}')
@@ -1091,7 +1094,7 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
     description = _build_discovery_description(artists, concerts)
     sp.update_playlist_description(playlist_id, description)
     sp.update_playlist_tracks(playlist_id, track_uris)
-    cache.record_run(trigger)
+    cache.record_run(trigger, 'discover')
 
     print(f'\nDiscovery playlist updated: {total} tracks (~{total_min}m) from {sum(1 for a in artists.values() if a.selected_tracks)} artists')
     print(f'Open: https://open.spotify.com/playlist/{playlist_id}')
@@ -1117,6 +1120,70 @@ def _write_env_value(key: str, value: str) -> None:
 
 # ── CLI entrypoint ────────────────────────────────────────────────────────────
 
+# ── Scheduled runs ───────────────────────────────────────────────────────────
+
+# A scheduled run often starts the moment the Mac wakes, before the network is
+# really back, or in a dark wake where it drops out mid-run. Waiting it out
+# costs nothing — nobody is watching — so transient failures are retried on
+# this schedule before the run is given up for the day.
+SCHEDULED_RETRY_DELAYS_S = (5 * 60, 15 * 60, 30 * 60)
+
+# launchd fires on the hour, and a run is logged a minute or two after it
+# starts, so a job meant to run every N hours sees "N hours less a minute"
+# at the matching tick. Without some slack it would wait a whole extra tick.
+SKIP_WINDOW_GRACE = timedelta(minutes=15)
+
+
+def _is_transient(e: BaseException) -> bool:
+    """
+    True for failures that a later attempt could plausibly avoid.
+
+    Every transport error the run can hit derives from OSError — requests',
+    niquests' (caldav's HTTP client), and the socket-level ones underneath —
+    including the QUIC "Idle timeout" urllib3-future raises as a ProtocolError,
+    which requests rewraps as its ConnectionError. Spotify's own errors are
+    transient only when it is rate limiting or failing. Anything else is a bug
+    or bad data, and retrying would just repeat it.
+    """
+    if isinstance(e, spotipy.SpotifyException):
+        return e.http_status == 429 or (e.http_status or 0) >= 500
+    return isinstance(e, OSError)
+
+
+def _run_with_retries(run: Callable[[], None], delays: tuple[int, ...]) -> None:
+    """Call `run`, retrying transient failures after each delay in turn."""
+    for delay in (*delays, None):
+        try:
+            run()
+            return
+        except Exception as e:
+            if delay is None or not _is_transient(e):
+                raise
+            logger.warning(f'Run failed ({type(e).__name__}: {e}) — retrying in {delay // 60}m')
+            time.sleep(delay)
+
+
+def _ran_within(cache: Cache, command: str, hours: float) -> bool:
+    """True if `command` last completed less than `hours` ago (less SKIP_WINDOW_GRACE)."""
+    last = cache.get_last_run(command)
+    if last is None:
+        return False
+    age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(last['run_at'])
+    return age < timedelta(hours=hours) - SKIP_WINDOW_GRACE
+
+
+def _run_playlist_update(command: str, run: Callable[[], None], args: argparse.Namespace) -> None:
+    """Shared entry for --update and --discover: interval gate, retries, error exit."""
+    if args.skip_if_ran_within is not None and _ran_within(Cache(), command, args.skip_if_ran_within):
+        logger.info(f'Skipping --{command}: last run finished under {args.skip_if_ran_within:g}h ago')
+        return
+    try:
+        _run_with_retries(run, SCHEDULED_RETRY_DELAYS_S if args.cron else ())
+    except (ValueError, RuntimeError) as e:
+        print(f'Error: {e}', file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Concert Playlist — auto-update a Spotify playlist from upcoming concerts'
@@ -1139,7 +1206,11 @@ def main() -> None:
     group.add_argument('--remove-concert', action='store_true', help='Remove a manual concert')
     group.add_argument('--list-concerts',  action='store_true', help='List manually added concerts')
     parser.add_argument('--verbose', '-v', action='store_true', help='Debug logging')
-    parser.add_argument('--cron', action='store_true', help='Mark this run as cron-triggered (used in run log)')
+    parser.add_argument('--cron', action='store_true',
+                        help='Scheduled run: tagged as cron in the run log, transient failures retried')
+    parser.add_argument('--skip-if-ran-within', type=float, metavar='HOURS',
+                        help='With --update/--discover: do nothing if that playlist was last updated '
+                             'less than HOURS ago (lets a frequent scheduler tick run a job less often)')
 
     args = parser.parse_args()
     if args.verbose:
@@ -1152,11 +1223,8 @@ def main() -> None:
     elif args.clear_cache is not None:
         cmd_clear_cache(args.clear_cache)
     elif args.update:
-        try:
-            cmd_build(dry_run=False, trigger='cron' if args.cron else 'manual')
-        except (ValueError, RuntimeError) as e:
-            print(f'Error: {e}', file=sys.stderr)
-            sys.exit(1)
+        trigger = 'cron' if args.cron else 'manual'
+        _run_playlist_update('update', lambda: cmd_build(dry_run=False, trigger=trigger), args)
     elif args.dry_run:
         try:
             cmd_build(dry_run=True)
@@ -1166,11 +1234,8 @@ def main() -> None:
     elif args.status:
         cmd_status()
     elif args.discover:
-        try:
-            cmd_discover(dry_run=False, trigger='cron' if args.cron else 'manual')
-        except (ValueError, RuntimeError) as e:
-            print(f'Error: {e}', file=sys.stderr)
-            sys.exit(1)
+        trigger = 'cron' if args.cron else 'manual'
+        _run_playlist_update('discover', lambda: cmd_discover(dry_run=False, trigger=trigger), args)
     elif args.discover_dry_run:
         try:
             cmd_discover(dry_run=True)

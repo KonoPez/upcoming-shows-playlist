@@ -35,14 +35,22 @@ LOG_FILE = LOG_DIR / 'launchd.log'
 PROJECT_DIR = Path(__file__).parent.resolve()
 MAIN        = PROJECT_DIR / 'main.py'
 
-PYTHON = PROJECT_DIR.parent / 'opt' / 'anaconda3' / 'envs' / 'concert-playlist' / 'bin' / 'python3.12'
+PYTHON = Path.home() / 'opt' / 'anaconda3' / 'envs' / 'concert-playlist' / 'bin' / 'python3.12'
 if not PYTHON.exists():
     PYTHON = Path(sys.executable)
 else:
     PYTHON = PYTHON.resolve()
 
-SCHEDULE_HOUR   = 9
-SCHEDULE_MINUTE = 0
+# Prep runs daily. Discovery changes slowly (Ticketmaster listings, not your
+# calendar), so it runs every DISCOVER_EVERY_HOURS instead. launchd can't
+# express that directly: StartInterval drops any firing that falls while the
+# Mac is asleep — the same gap that ruled out cron. So discovery ticks every
+# few hours on the calendar, which launchd does catch up at wake, and main.py's
+# --skip-if-ran-within turns all but the due tick into a no-op. The real
+# cadence is DISCOVER_EVERY_HOURS rounded up to the next tick.
+UPDATE_TIMES          = [(9, 0)]
+DISCOVER_TIMES        = [(3, 0), (9, 0), (15, 0), (21, 0)]
+DISCOVER_EVERY_HOURS  = 60
 
 # Legacy cron markers to clean up on install
 _CRON_MARKERS = ('# concert-playlist',)
@@ -50,7 +58,22 @@ _CRON_MARKERS = ('# concert-playlist',)
 
 # ── Plist generation ──────────────────────────────────────────────────────────
 
-def _plist(label: str, flag: str) -> str:
+def _calendar_interval(times: list[tuple[int, int]]) -> str:
+    entries = ''.join(
+        f"""
+        <dict>
+            <key>Hour</key>
+            <integer>{hour}</integer>
+            <key>Minute</key>
+            <integer>{minute}</integer>
+        </dict>"""
+        for hour, minute in times
+    )
+    return f'<array>{entries}\n    </array>'
+
+
+def _plist(label: str, args: list[str], times: list[tuple[int, int]]) -> str:
+    arguments = ''.join(f'\n        <string>{a}</string>' for a in [str(PYTHON), str(MAIN), *args])
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -61,23 +84,14 @@ def _plist(label: str, flag: str) -> str:
     <string>{label}</string>
 
     <key>ProgramArguments</key>
-    <array>
-        <string>{PYTHON}</string>
-        <string>{MAIN}</string>
-        <string>{flag}</string>
-        <string>--cron</string>
+    <array>{arguments}
     </array>
 
     <key>WorkingDirectory</key>
     <string>{PROJECT_DIR}</string>
 
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>{SCHEDULE_HOUR}</integer>
-        <key>Minute</key>
-        <integer>{SCHEDULE_MINUTE}</integer>
-    </dict>
+    {_calendar_interval(times)}
 
     <key>StandardOutPath</key>
     <string>{LOG_FILE}</string>
@@ -89,6 +103,18 @@ def _plist(label: str, flag: str) -> str:
 </dict>
 </plist>
 """
+
+
+def update_plist() -> str:
+    return _plist(LABEL_UPDATE, ['--update', '--cron'], UPDATE_TIMES)
+
+
+def discover_plist() -> str:
+    return _plist(
+        LABEL_DISCOVER,
+        ['--discover', '--cron', '--skip-if-ran-within', str(DISCOVER_EVERY_HOURS)],
+        DISCOVER_TIMES,
+    )
 
 
 # ── launchctl helpers ─────────────────────────────────────────────────────────
@@ -150,6 +176,10 @@ def _remove_legacy_cron() -> bool:
 
 # ── User prompts ──────────────────────────────────────────────────────────────
 
+def _times(times: list[tuple[int, int]]) -> str:
+    return ', '.join(f'{h:02d}:{m:02d}' for h, m in times)
+
+
 def _ask(prompt: str, default: bool = True) -> bool:
     hint = '[Y/n]' if default else '[y/N]'
     answer = input(f'{prompt} {hint}: ').strip().lower()
@@ -166,7 +196,8 @@ def install() -> None:
 
     print('\n=== Concert Playlist — Scheduler Setup ===\n')
     run_update   = _ask('Schedule daily prep playlist update (--update)?',     default=True)
-    run_discover = _ask('Schedule daily discovery playlist update (--discover)?', default=False)
+    run_discover = _ask(f'Schedule discovery playlist update every {DISCOVER_EVERY_HOURS}h (--discover)?',
+                        default=False)
 
     if not run_update and not run_discover:
         print('Nothing selected — no jobs installed.')
@@ -180,18 +211,17 @@ def install() -> None:
 
     if run_update:
         _unload(LABEL_UPDATE)
-        PLIST_UPDATE.write_text(_plist(LABEL_UPDATE, '--update'))
+        PLIST_UPDATE.write_text(update_plist())
         _load(PLIST_UPDATE)
-        installed.append(f'  [prep]      {PLIST_UPDATE}')
+        installed.append(f'  [prep]      daily at {_times(UPDATE_TIMES)} — {PLIST_UPDATE}')
 
     if run_discover:
         _unload(LABEL_DISCOVER)
-        PLIST_DISCOVER.write_text(_plist(LABEL_DISCOVER, '--discover'))
+        PLIST_DISCOVER.write_text(discover_plist())
         _load(PLIST_DISCOVER)
-        installed.append(f'  [discover]  {PLIST_DISCOVER}')
+        installed.append(f'  [discover]  every {DISCOVER_EVERY_HOURS}h, checked at {_times(DISCOVER_TIMES)} — {PLIST_DISCOVER}')
 
-    print(f'\nInstalled — runs daily at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}.')
-    print('Jobs fire at the scheduled time, or at next wake if the Mac was asleep.')
+    print('\nInstalled. Jobs fire at the scheduled time, or at next wake if the Mac was asleep.')
     for line in installed:
         print(line)
     print(f'\nLogs: {LOG_FILE}')
