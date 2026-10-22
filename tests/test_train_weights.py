@@ -9,7 +9,7 @@ from datetime import date, timedelta
 import pytest
 
 from sources.models import Track
-from train_weights import (
+from tools.train_weights import (
     FULL_FEATURES, LISTNET, RATIO, Group, build_groups, fit_grid, fit_sgd,
     normalized, project, simplex_grid,
 )

@@ -3,7 +3,7 @@
 Print every track in an artist's discography with per-signal scores.
 
 Usage:
-    python debug_artist_scores.py "Artist Name"
+    python -m tools.debug_artist_scores "Artist Name"
 """
 
 import sys
@@ -99,6 +99,6 @@ def main(artist_name: str) -> None:
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print('Usage: python debug_artist_scores.py "Artist Name"')
+        print('Usage: python -m tools.debug_artist_scores "Artist Name"')
         sys.exit(1)
     main(' '.join(sys.argv[1:]))

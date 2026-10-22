@@ -4,8 +4,8 @@ Fit the relative weights of the setlist, Last.fm and recency track signals
 against what artists actually went on to play live.
 
 Usage:
-    python train_weights.py fetch [--max-requests N] [--max-discographies N]
-    python train_weights.py fit [--loss ratio|listnet]
+    python -m tools.train_weights fetch [--max-requests N] [--max-discographies N]
+    python -m tools.train_weights fit [--loss ratio|listnet]
 
 Each training example is one artist at one cutoff date. The inputs are the
 three signals exactly as `score_track` would have seen them on that date —
@@ -642,7 +642,7 @@ def cmd_fit(obj: Objective) -> None:
     if skipped:
         print('Artists left out: ' + ', '.join(f'{n} {why}' for why, n in skipped.most_common()))
     if not groups:
-        sys.exit('No training examples — run `python train_weights.py fetch` first.')
+        sys.exit('No training examples — run `python -m tools.train_weights fetch` first.')
 
     signal_w = 1 - NOVELTY_W
     current_full = normalized([SETLIST_W, LASTFM_W, RECENCY_W])

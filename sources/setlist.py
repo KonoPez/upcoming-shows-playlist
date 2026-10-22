@@ -67,7 +67,7 @@ def setlist_frequencies(shows: list[tuple[date, set[str]]]) -> dict[str, float]:
 
     Samples up to MAX_SHOWS shows within MAX_SPREAD_DAYS of the newest one —
     the window is anchored on the artist's own latest show, not on today.
-    Pure, so `train_weights.py` can replay it against any slice of an artist's
+    Pure, so `tools/train_weights.py` can replay it against any slice of an artist's
     history and see exactly the feature production would have seen then.
     """
     if not shows:
