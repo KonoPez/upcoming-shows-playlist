@@ -64,7 +64,7 @@ class Config:
     discovery_target_duration_minutes: int = 90
 
     # Playlist tuning
-    concert_window_days: int = 90
+    concert_window_days: int = 180
     playlist_target_duration_minutes: int = 120
 
     @property

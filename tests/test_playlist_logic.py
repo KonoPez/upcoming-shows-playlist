@@ -395,13 +395,14 @@ class TestFamiliarityInAllocation:
     def test_familiar_artist_is_evicted_before_the_novel_one(self):
         # The crowded-calendar case from issue #3. Both marginal artists play
         # the same night in the same role; only familiarity separates them, and
-        # the budget has room for exactly one of them above the floor.
+        # the budget has room for exactly one of them above the floor. Placing
+        # them a half-life out keeps that true whatever HALF_LIFE_DAYS is.
         bill = {
             'near1': [_concert(0)],
             'near2': [_concert(0)],
             'near3': [_concert(0)],
-            'zeta_familiar': [_concert(20)],
-            'alpha_novel': [_concert(20)],
+            'zeta_familiar': [_concert(int(HALF_LIFE_DAYS))],
+            'alpha_novel': [_concert(int(HALF_LIFE_DAYS))],
         }
         weights = compute_artist_weights(bill, _TODAY, {'zeta_familiar': 1.0, 'alpha_novel': 0.0})
         slots = allocate_slots(
@@ -415,8 +416,8 @@ class TestFamiliarityInAllocation:
             'near1': [_concert(0)],
             'near2': [_concert(0)],
             'near3': [_concert(0)],
-            'zeta_familiar': [_concert(20)],
-            'alpha_novel': [_concert(20)],
+            'zeta_familiar': [_concert(int(HALF_LIFE_DAYS))],
+            'alpha_novel': [_concert(int(HALF_LIFE_DAYS))],
         }
         weights = compute_artist_weights(bill, _TODAY, {'zeta_familiar': 1.0, 'alpha_novel': 0.0})
         slots = allocate_slots(

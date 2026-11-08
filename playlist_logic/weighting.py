@@ -1,12 +1,13 @@
 """
 Concert-proximity weighting and track-slot allocation.
 
-Weights follow exponential decay with a 21-day half-life:
+Weights follow exponential decay with a 14-day half-life:
   - Concert today     → weight = 1.00
-  - Concert tomorrow  → weight ≈ 0.968
-  - Concert in 3 wks  → weight ≈ 0.50
-  - Concert in 6 wks  → weight ≈ 0.25
-  - Concert in 90 days → weight ≈ 0.056
+  - Concert tomorrow  → weight ≈ 0.952
+  - Concert in 2 wks  → weight ≈ 0.50
+  - Concert in 4 wks  → weight ≈ 0.25
+  - Concert in 90 days → weight ≈ 0.012
+  - Concert in 180 days → weight ≈ 0.0001
 
 Artist familiarity then trims that weight slightly: an artist you already know
 well needs less prep than one you have never heard, so their share is scaled by
@@ -16,7 +17,7 @@ floor on a crowded calendar, but it never outranks proximity itself.
 
 Artists are allocated a proportional share of the target playlist size.
 Artists too far away to receive even the minimum slot count are excluded —
-this implements the "don't force in artists from the end of the 90-day window
+this implements the "don't force in artists from the end of the 180-day window
 if near-term concerts already fill the list" requirement.
 
 Hamilton's method (largest remainder) is used to distribute rounding errors
@@ -33,7 +34,7 @@ from sources.models import Concert
 
 logger = logging.getLogger(__name__)
 
-HALF_LIFE_DAYS = 21.0
+HALF_LIFE_DAYS = 14.0
 _LAMBDA = math.log(2) / HALF_LIFE_DAYS
 HEADLINER_BONUS = 1.5  
 MIN_ARTIST_BUDGET_MS = 120_000
