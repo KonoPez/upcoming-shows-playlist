@@ -15,6 +15,7 @@ from typing import Optional
 import spotipy
 
 from cache import Cache
+from repair import pins
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,13 @@ def resolve_artist(
     """
     Resolve an artist name to a Spotify artist ID.
     Returns the ID string, or None if unresolvable.
+    A pin (`python -m repair pin`) overrides everything else.
     Results are cached for RESOLUTION_TTL seconds.
     """
+    pin = pins.lookup_artist(cache, artist_name)
+    if pin is not None:
+        return pin.artist_id
+
     cache_key = f'artist_resolve:{artist_name.lower().strip()}'
 
     cached = cache.get(cache_key)

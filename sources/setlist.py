@@ -121,31 +121,33 @@ class SetlistClient:
             'Accept': 'application/json',
         }
 
-    def get_setlist_scores(self, artist_name: str) -> dict[str, float]:
+    def get_setlist_scores(self, artist_name: str, mbid: Optional[str] = None) -> dict[str, float]:
         """
         Return {normalized_track_name: frequency_score} for an artist.
 
         frequency_score = appearances across sampled shows / shows_analyzed.
         Covers up to MAX_SHOWS shows within MAX_SPREAD_DAYS of the artist's
         most recent show. Results are cached for SETLIST_TTL seconds.
+
+        `mbid` pins the MusicBrainz artist instead of picking one by name.
         """
         cache_key = f'setlist:{artist_name.lower().strip()}'
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
 
-        scores = self._fetch_setlist_scores(artist_name)
+        scores = self._fetch_setlist_scores(artist_name, mbid)
         # Cache even an empty result so a miss doesn't re-hit the API every run.
         self.cache.set(cache_key, scores, SETLIST_TTL)
         return scores
 
-    def _fetch_setlist_scores(self, artist_name: str) -> dict[str, float]:
+    def _fetch_setlist_scores(self, artist_name: str, mbid: Optional[str] = None) -> dict[str, float]:
         time.sleep(1.0)
         try:
             resp = requests.get(
                 f'{BASE_URL}/search/setlists',
                 headers=self._headers,
-                params={'artistName': artist_name, 'p': 1},
+                params={'artistMbid': mbid, 'p': 1} if mbid else {'artistName': artist_name, 'p': 1},
                 timeout=10,
             )
             resp.raise_for_status()
@@ -162,7 +164,7 @@ class SetlistClient:
         # results all belong to someone else, so return nothing: an empty dict
         # drops the setlist weight out of `score_track`, whereas a stranger's
         # setlists would actively penalise every song they never play.
-        mbid = find_artist_mbid(setlists, artist_name)
+        mbid = mbid or find_artist_mbid(setlists, artist_name)
         if mbid is None:
             logger.debug(f'Setlist.fm: no setlists by exactly "{artist_name}" in search results')
             return {}

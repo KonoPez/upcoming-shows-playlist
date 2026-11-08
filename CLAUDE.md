@@ -33,6 +33,13 @@ python main.py --update --cron      # scheduled run: tagged 'cron' in the run lo
 python main.py --discover --skip-if-ran-within 60  # no-op if discovery last ran <60h ago (used by the scheduler)
 python -m tools.train_weights fetch # gather setlist.fm history for weight fitting (--max-requests N)
 python -m tools.train_weights fit   # fit + cross-validate track-scoring weights, print suggested constants
+python -m repair resolutions        # every upcoming billed name: raw title → parsed name → Spotify artist + releases
+python -m repair candidates NAME    # every Spotify / setlist.fm artist NAME could be, with releases and your plays
+python -m repair pin NAME ID        # force NAME to a Spotify artist (alias or namesake fix); `--none [--until DATE]` for no artist
+python -m repair pin-setlist NAME MBID  # force NAME's setlist.fm artist; unpin / unpin-setlist / pins to manage
+python -m repair refresh NAME       # drop one artist's cached discography, setlist, Last.fm and lineups
+python -m repair audit NAME         # setlist.fm / Last.fm song names that never match a Spotify track
+                                    # every repair command takes --json
 ```
 
 ## Running tests
@@ -41,7 +48,7 @@ python -m tools.train_weights fit   # fit + cross-validate track-scoring weights
 python -m pytest tests/ -v
 ```
 
-621 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
+655 tests, no external dependencies required (no Spotify/calendar calls). Tests run in ~20 seconds.
 
 ## Project layout
 
@@ -77,8 +84,14 @@ tests/
   test_discovery.py             # Discovery scoring, familiarity, slot guarantee, TM local events
   test_train_weights.py         # Weight fitting: before/after cutoff split, gradient, optimiser
   test_setup_cron.py            # launchd plist generation: arguments, schedules
+  test_repair.py                # pins and the hooks honouring them, resolutions, refresh, audit
 conftest.py                     # Adds project root to sys.path for test imports
 setup_cron.py                   # Interactive cron installer — asks which playlists to schedule
+repair/                         # one-off fixes the pipeline gets wrong; `python -m repair --help`
+  pins.py                       # artist + setlist.fm MBID pins, in their own tables
+  lookup.py                     # resolutions (cache-only) and candidates (paged Spotify search)
+  refresh.py                    # per-artist cache drop
+  audit.py                      # stored setlist/Last.fm names that miss every Spotify title
 tools/
   debug_artist_scores.py        # Dev tool: print per-signal track scores for one artist
   train_weights.py              # Dev tool: fit setlist/Last.fm/recency weights against later setlists
@@ -126,6 +139,8 @@ On the first `--discover` run the user is asked for IP geolocation consent; the 
 **Ticketmaster local event discovery** (`TicketmasterClient.get_local_events`): Queries the Discovery API with a geo location (latlong or city) + radius + date range. Returns one `Concert` object per attraction per event; the first attraction is treated as the headliner (`is_opener=False`), remaining ones as openers (`is_opener=True`). Source is `'ticketmaster_discovery'`. Paginates up to `LOCAL_EVENTS_MAX_PAGES` (5 pages × 100 events = up to 500 events). Results cached 6 hours.
 
 **Artist resolution**: Calendar title → artist name via `artist_resolver.extract_artist_from_calendar_title` (strips "Ticket(s): " prefixes, venue/tour suffixes, etc.), then `split_artist_names` for multi-artist bills. `split_artist_names` only splits on bare commas/& when the structure unambiguously signals a list (≥2 commas, or comma + conjunction) — a single lone comma is kept intact to avoid breaking band names like "Black Country, New Road". `w/`, `feat.` and `//` separate acts outright ("Lowboy // Charlieboy // Dad Bods" → 3 artists); a single `/` does not, since it sits inside names like "AC/DC". Anything following one of them is a support list, so a bare conjunction there *is* a separator ("Prince Daddy and the Hyena w/ Combat and Walter Etc." → 3 artists). A conjunction followed by "the" is never a separator, since "X and the Y" is overwhelmingly one band name. `_normalize` folds `&` → `and` so the calendar's spelling matches Spotify's. Results cached 90 days; failures cached 1 day so bug fixes take effect quickly.
+
+**Repair tools** (`repair/`): one-off data cases — a local act sharing its name with someone else, a band billed under two names — are fixed with `python -m repair`, not with heuristics in the every-run pipeline. Every command takes `--json` so an LLM can drive it; the investigation (whose band is this?) is left to whoever runs it. Pins live in their own `artist_pins` / `setlist_mbid_pins` tables, not as `artist_resolve:` entries, so neither a TTL nor `--clear-cache` undoes a correction. Outside the package there are two hooks: `resolve_artist` returns a live artist pin before consulting the cache, Ticketmaster or search (a `--none` pin returns `None`), and both pipelines pass a pinned MBID to `SetlistClient.get_setlist_scores`, which then queries `artistMbid` instead of choosing by name. An artist pin is keyed by billed name, so aliases each get one ("Sheebie & the Lovemakers" and "Sheebie" → the same `SHEEBIE`); a setlist pin is keyed by Spotify ID, because a namesake shares the name by definition. **There is no Last.fm pin**: `artist.getTopTracks` accepts an `mbid` but answers for the name's merged page regardless — the US, UK and French Nirvana MBIDs all return the grunge band's top tracks (checked 2026-11-08) — so Last.fm namesakes can be seen with `audit` but not separated. `candidates` pages the quoted search five deep because the right artist is often past the ten results `resolve_artist` sees: the Madison LOWBOY is result 11 of 36 for "Lowboy". `audit` compares stored names *as stored*, exactly as `score_track` does, so it surfaces the misses #5 describes rather than normalising them away.
 
 **Artist search matching** (`_search_spotify`): Spotify search is asked for the quoted phrase (`artist:"Name"`) first, which prevents Lucene splitting on commas ("Black Country, New Road"). The quoted query ranks by how well the *whole* field matches, so a short generic name is buried under every longer name containing it — the band "The Central" appears nowhere in the ten results, which are filled by "The Central Band Of The R.A.F." and similar military bands. When the quoted query returns nothing matching the name in full, the name is searched again unquoted, which ranks the exact match first; the best candidate across both queries wins. The second request only fires on that path (measured: 11 of 219 cached resolutions). Depth cannot come from a wider first page instead — Spotify answers `limit` above 10 with `400 Invalid limit` for this app. Candidates are scored: exact name 200, equal after `_normalize` 100, otherwise a partial match scaled by the share of the longer name it covers, up to 50. **Partial matches compare whole words, not raw characters** — "e.t." normalises to "e t", which is a substring of "cage the elephant" by pure coincidence of letters — and must cover at least `MIN_PARTIAL_COVERAGE` (25%) of the longer name's words, so "The Central" cannot claim a seven-word band name while "Poly Mall Cops" still resolves to "Greg Wheeler and the Poly Mall Cops". Anything below that is no match at all, and the artist is logged as unresolved rather than silently given someone else's tracks.
 

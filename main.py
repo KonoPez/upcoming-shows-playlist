@@ -26,6 +26,7 @@ import spotipy
 from config import config, APP_DIR
 from cache import Cache
 from artist_resolver import resolve_artist
+from repair import pins
 from sources.models import Artist, Concert, Track
 from track_names import normalize_track_name
 from sources.apple_calendar import AppleCalendarClient
@@ -454,7 +455,10 @@ def cmd_build(dry_run: bool = False, trigger: str = 'manual') -> None:
             continue
 
         play_counts = cache.get_play_counts(artist_id)
-        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else {}
+        artist.setlist_scores = (
+            setlist_client.get_setlist_scores(artist.name, pins.lookup_setlist_mbid(cache, artist_id))
+            if setlist_client else {}
+        )
         artist.lastfm_scores  = lastfm_client.get_popularity_scores(artist.name) if lastfm_client else {}
         tracks = deduplicate_tracks(tracks, artist.lastfm_scores)
         artist.selected_tracks = select_tracks_for_artist(
@@ -1024,7 +1028,10 @@ def cmd_discover(dry_run: bool = False, trigger: str = 'manual') -> None:
             continue
 
         play_counts_artist = cache.get_play_counts(artist_id)
-        artist.setlist_scores = setlist_client.get_setlist_scores(artist.name) if setlist_client else {}
+        artist.setlist_scores = (
+            setlist_client.get_setlist_scores(artist.name, pins.lookup_setlist_mbid(cache, artist_id))
+            if setlist_client else {}
+        )
         artist.lastfm_scores  = lastfm_track_client.get_popularity_scores(artist.name) if lastfm_track_client else {}
         tracks = deduplicate_tracks(tracks, artist.lastfm_scores)
         artist.selected_tracks = select_tracks_for_artist(
