@@ -182,9 +182,9 @@ def split_artist_names(artist_string: str) -> list[str]:
     Band names contain commas and conjunctions too, so a string whose structure
     doesn't clearly signal a list is returned intact as a single name.
     """
-    # "w/" and "feat." generally separate one act from another.
+    # "w/", "feat." and "//" generally separate one act from another.
     parts = re.split(
-        r'\s+w/\s+|\s+(?:feat\.?|ft\.?|featuring)\s+',
+        r'\s+w/\s+|\s+(?:feat\.?|ft\.?|featuring)\s+|\s*//\s*',
         artist_string,
         flags=re.IGNORECASE,
     )

@@ -417,8 +417,9 @@ def enrich_with_openers(
     client: TicketmasterClient,
 ) -> list[Concert]:
     """
-    For each calendar event that yielded fewer than 2 artists, query
-    Ticketmaster for supporting acts and append them to the list.
+    For each calendar event, query Ticketmaster for the rest of the bill and
+    append it to the list. Multi-artist titles are queried too, since a title
+    can name some acts and still miss others.
     """
     groups: dict[tuple, list[Concert]] = defaultdict(list)
     for c in concerts:
@@ -427,13 +428,12 @@ def enrich_with_openers(
 
     additional: list[Concert] = []
     for (_, event_date), group in groups.items():
-        if len(group) < 2:
-            headliner = group[0]
-            openers = client.lookup_openers(
-                headliner.artist_name, event_date, headliner.venue
-            )
-            for opener in openers:
-                opener.event_name = headliner.event_name  # same concert, not a separate event
-            additional.extend(openers)
+        headliner = group[0]
+        openers = client.lookup_openers(
+            headliner.artist_name, event_date, headliner.venue
+        )
+        for opener in openers:
+            opener.event_name = headliner.event_name  # same concert, not a separate event
+        additional.extend(openers)
 
     return concerts + additional

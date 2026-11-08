@@ -475,6 +475,20 @@ class TestSplitArtistNames:
     def test_w_slash_case_insensitive(self):
         assert split_artist_names("Hozier W/ Allison Russell") == ["Hozier", "Allison Russell"]
 
+    # ── // separator ──────────────────────────────────────────────────────────
+
+    def test_double_slash_bill(self):
+        # Regression: the 12/4 Gamma Ray Bar bill resolved to nothing at all.
+        title = "Ticket: Lowboy // Charlieboy // Dad Bods"
+        artist_string = extract_artist_from_calendar_title(title)
+        assert split_artist_names(artist_string) == ["Lowboy", "Charlieboy", "Dad Bods"]
+
+    def test_double_slash_without_spaces(self):
+        assert split_artist_names("Lowboy//Charlieboy") == ["Lowboy", "Charlieboy"]
+
+    def test_single_slash_kept_intact(self):
+        assert split_artist_names("AC/DC") == ["AC/DC"]
+
     # ── feat separator ────────────────────────────────────────────────────────
 
     def test_feat_period(self):

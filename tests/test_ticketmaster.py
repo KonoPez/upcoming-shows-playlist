@@ -412,15 +412,23 @@ class TestEnrichWithOpeners:
         assert len(result) == 2
         assert any(c.artist_name == 'INOHA' for c in result)
 
-    def test_multi_artist_event_not_re_queried(self):
+    def test_multi_artist_event_queried_once_by_headliner(self):
+        # Regression: "Social Cig & Paperback w/ James Norcross" yields two
+        # names but Ticketmaster bills three acts, so Paperback was dropped.
         concerts = [
-            self._concert('Mitski'),
-            self._concert('boygenius'),  # same event_name + date
+            self._concert('Social Cig & Paperback'),
+            self._concert('James Norcross'),  # same event_name + date
         ]
         mock_client = MagicMock()
+        mock_client.lookup_openers.return_value = [
+            self._concert('Paperback', source='ticketmaster')
+        ]
         result = enrich_with_openers(concerts, mock_client)
-        mock_client.lookup_openers.assert_not_called()
-        assert len(result) == 2
+        mock_client.lookup_openers.assert_called_once()
+        assert mock_client.lookup_openers.call_args.args[0] == 'Social Cig & Paperback'
+        assert [c.artist_name for c in result] == [
+            'Social Cig & Paperback', 'James Norcross', 'Paperback'
+        ]
 
     def test_ticketmaster_sourced_concerts_not_re_queried(self):
         concerts = [self._concert('INOHA', source='ticketmaster')]
